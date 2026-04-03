@@ -14,6 +14,7 @@ from orchestrator.models import (
     FailurePolicy,
     JobSpec,
     ResourceWeight,
+    ServiceSpec,
     VolumeMount,
 )
 
@@ -51,6 +52,18 @@ class RawJobConfig:
 
 
 @dataclass
+class RawServiceConfig:
+    """Schema for a pipeline-wide service container."""
+
+    id: str
+    image: str
+    aliases: list[str] = field(default_factory=list)
+    command: list[str] | None = None
+    volumes: list[RawVolumeConfig] = field(default_factory=list)
+    env_vars: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class RawPipelineConfig:
     """Schema for the top-level YAML configuration file."""
 
@@ -59,6 +72,8 @@ class RawPipelineConfig:
     max_parallel: int = 4
     total_cpu_slots: int = 8
     total_memory_slots: int = 8
+    network: str | None = None
+    services: list[RawServiceConfig] = field(default_factory=list)
 
 
 class IConfigLoader(ABC):
@@ -150,6 +165,8 @@ class YamlConfigLoader(IConfigLoader):
             max_parallel=_expect_int(data, "max_parallel", default=4),
             total_cpu_slots=_expect_int(data, "total_cpu_slots", default=8),
             total_memory_slots=_expect_int(data, "total_memory_slots", default=8),
+            network=_parse_optional_string(data, "network"),
+            services=_parse_services(data.get("services", [])),
         )
 
     # ------------------------------------------------------------------
@@ -170,6 +187,12 @@ class YamlConfigLoader(IConfigLoader):
             raise ConfigurationError("total_cpu_slots must be >= 1")
         if raw.total_memory_slots < 1:
             raise ConfigurationError("total_memory_slots must be >= 1")
+        if raw.network is not None and not raw.network:
+            raise ConfigurationError("network must not be empty")
+        if raw.services and raw.network is None:
+            raise ConfigurationError(
+                "services require network so jobs can reach service containers"
+            )
 
         seen_ids: set[str] = set()
         for job in raw.jobs:
@@ -190,6 +213,17 @@ class YamlConfigLoader(IConfigLoader):
                 raise ConfigurationError(f"Job '{job.id}': cpu_slots must be >= 1")
             if job.memory_slots < 1:
                 raise ConfigurationError(f"Job '{job.id}': memory_slots must be >= 1")
+
+        seen_service_ids: set[str] = set()
+        for service in raw.services:
+            if not service.id:
+                raise ConfigurationError("services[].id must not be empty")
+            if service.id in seen_service_ids:
+                raise ConfigurationError(f"Duplicate service id '{service.id}'")
+            seen_service_ids.add(service.id)
+            for alias in service.aliases:
+                if not alias:
+                    raise ConfigurationError(f"Service '{service.id}': aliases must not be empty")
 
     # ------------------------------------------------------------------
     # Conversion
@@ -232,6 +266,25 @@ class YamlConfigLoader(IConfigLoader):
             max_parallel=raw.max_parallel,
             total_cpu_slots=raw.total_cpu_slots,
             total_memory_slots=raw.total_memory_slots,
+            network=raw.network,
+            services=[
+                ServiceSpec(
+                    id=service.id,
+                    image=service.image,
+                    aliases=service.aliases if service.aliases else [service.id],
+                    command=service.command,
+                    volumes=[
+                        VolumeMount(
+                            host_path=v.host_path,
+                            container_path=v.container_path,
+                            read_only=v.read_only,
+                        )
+                        for v in service.volumes
+                    ],
+                    env_vars=service.env_vars,
+                )
+                for service in raw.services
+            ],
         )
 
 
@@ -271,27 +324,7 @@ def _parse_job(entry: dict[str, Any], index: int) -> RawJobConfig:
             )
         )
 
-    volumes: list[RawVolumeConfig] = []
-    for j, vol in enumerate(entry.get("volumes", [])):
-        if not isinstance(vol, dict):
-            raise ConfigurationError(f"{prefix}.volumes[{j}]: expected a mapping")
-        for req_key in ("host_path", "container_path"):
-            if req_key not in vol:
-                raise ConfigurationError(
-                    f"{prefix}.volumes[{j}]: missing '{req_key}'"
-                )
-        read_only = vol.get("read_only", False)
-        if not isinstance(read_only, bool):
-            raise ConfigurationError(
-                f"{prefix}.volumes[{j}].read_only: expected a boolean"
-            )
-        volumes.append(
-            RawVolumeConfig(
-                host_path=str(vol["host_path"]),
-                container_path=str(vol["container_path"]),
-                read_only=read_only,
-            )
-        )
+    volumes = _parse_volumes(entry.get("volumes", []), prefix=f"{prefix}.volumes")
 
     env_vars = entry.get("env_vars", {})
     if not isinstance(env_vars, dict):
@@ -323,3 +356,84 @@ def _expect_int(
         loc = f"{prefix}.{key}" if prefix else key
         raise ConfigurationError(f"{loc}: expected an integer, got {type(value).__name__}")
     return value
+
+
+def _parse_optional_string(data: dict[str, Any], key: str) -> str | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ConfigurationError(f"{key}: expected a string")
+    return value
+
+
+def _parse_volumes(raw_volumes: Any, prefix: str) -> list[RawVolumeConfig]:
+    if not isinstance(raw_volumes, list):
+        raise ConfigurationError(f"{prefix}: expected a list")
+
+    volumes: list[RawVolumeConfig] = []
+    for j, vol in enumerate(raw_volumes):
+        vol_prefix = f"{prefix}[{j}]"
+        if not isinstance(vol, dict):
+            raise ConfigurationError(f"{vol_prefix}: expected a mapping")
+        for req_key in ("host_path", "container_path"):
+            if req_key not in vol:
+                raise ConfigurationError(f"{vol_prefix}: missing '{req_key}'")
+        read_only = vol.get("read_only", False)
+        if not isinstance(read_only, bool):
+            raise ConfigurationError(f"{vol_prefix}.read_only: expected a boolean")
+        volumes.append(
+            RawVolumeConfig(
+                host_path=str(vol["host_path"]),
+                container_path=str(vol["container_path"]),
+                read_only=read_only,
+            )
+        )
+    return volumes
+
+
+def _parse_services(raw_services: Any) -> list[RawServiceConfig]:
+    if not isinstance(raw_services, list):
+        raise ConfigurationError("services: expected a list")
+
+    services: list[RawServiceConfig] = []
+    for i, raw_service in enumerate(raw_services):
+        prefix = f"services[{i}]"
+        if not isinstance(raw_service, dict):
+            raise ConfigurationError(f"{prefix}: expected a mapping")
+        if "id" not in raw_service:
+            raise ConfigurationError(f"{prefix}: missing required key 'id'")
+        if "image" not in raw_service:
+            raise ConfigurationError(f"{prefix}: missing required key 'image'")
+
+        service_id = raw_service["id"]
+        image = raw_service["image"]
+        if not isinstance(service_id, str):
+            raise ConfigurationError(f"{prefix}.id: expected a string")
+        if not isinstance(image, str):
+            raise ConfigurationError(f"{prefix}.image: expected a string")
+
+        aliases = raw_service.get("aliases", [])
+        if not isinstance(aliases, list) or not all(isinstance(a, str) for a in aliases):
+            raise ConfigurationError(f"{prefix}.aliases: expected a list of strings")
+
+        command = raw_service.get("command")
+        if command is not None:
+            if not isinstance(command, list) or not all(isinstance(c, str) for c in command):
+                raise ConfigurationError(f"{prefix}.command: expected a list of strings or null")
+
+        env_vars = raw_service.get("env_vars", {})
+        if not isinstance(env_vars, dict):
+            raise ConfigurationError(f"{prefix}.env_vars: expected a mapping")
+
+        services.append(
+            RawServiceConfig(
+                id=service_id,
+                image=image,
+                aliases=aliases,
+                command=command,
+                volumes=_parse_volumes(raw_service.get("volumes", []), prefix=f"{prefix}.volumes"),
+                env_vars={str(k): str(v) for k, v in env_vars.items()},
+            )
+        )
+    return services

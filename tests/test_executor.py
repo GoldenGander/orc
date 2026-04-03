@@ -14,12 +14,17 @@ from unittest.mock import patch
 import pytest
 
 from orchestrator.executor import DockerExecutor, ExecutorABC
+from orchestrator.exceptions import ConfigurationError
 from orchestrator.logger import FileJobLogger
 from orchestrator.models import (
     ArtifactSpec,
+    BuildPlan,
+    FailurePolicy,
     JobResult,
     JobSpec,
     ResourceWeight,
+    ServiceSpec,
+    VolumeMount,
 )
 
 
@@ -241,3 +246,131 @@ class TestShutdown:
         ex.shutdown(wait=True)
         assert future.done()
         assert future.result().success is True
+
+
+class TestPipelineLifecycle:
+    def _plan(
+        self,
+        *,
+        network: str | None = None,
+        services: list[ServiceSpec] | None = None,
+    ) -> BuildPlan:
+        return BuildPlan(
+            jobs=[],
+            failure_policy=FailurePolicy.FAIL_FAST,
+            max_parallel=2,
+            total_cpu_slots=2,
+            total_memory_slots=2,
+            network=network,
+            services=services or [],
+        )
+
+    def test_start_adds_network_to_job_runs(
+        self, executor: DockerExecutor, job_no_command: JobSpec
+    ) -> None:
+        with patch(
+            "orchestrator.executor.docker_executor.subprocess.run",
+            return_value=subprocess.CompletedProcess(["docker"], 0),
+        ):
+            executor.start(self._plan(network="build-net"))
+
+        cmd = executor._build_docker_command(job_no_command)
+        assert "--network" in cmd
+        net_index = cmd.index("--network")
+        assert cmd[net_index + 1] == "build-net"
+
+    def test_start_services_without_network_raises(
+        self, executor: DockerExecutor
+    ) -> None:
+        plan = self._plan(
+            services=[ServiceSpec(
+                id="redis",
+                image="redis:7-alpine",
+                aliases=["redis"],
+                command=None,
+                volumes=[],
+            )]
+        )
+        with pytest.raises(ConfigurationError, match="services require network"):
+            executor.start(plan)
+
+    def test_start_creates_network_and_starts_service_containers(
+        self, executor: DockerExecutor
+    ) -> None:
+        redis = ServiceSpec(
+            id="redis",
+            image="redis:7-alpine",
+            aliases=["redis"],
+            command=["redis-server", "--appendonly", "yes"],
+            volumes=[
+                VolumeMount(
+                    host_path="/host/cache",
+                    container_path="/data",
+                    read_only=False,
+                )
+            ],
+            env_vars={"REDIS_PASSWORD": "secret"},
+        )
+        queue = ServiceSpec(
+            id="queue",
+            image="memcached:1.6",
+            aliases=["cache-queue"],
+        )
+        plan = self._plan(network="build-net", services=[redis, queue])
+
+        calls: list[list[str]] = []
+
+        def _fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            if cmd[:4] == ["docker", "network", "inspect", "build-net"]:
+                return subprocess.CompletedProcess(cmd, 1)
+            return subprocess.CompletedProcess(cmd, 0)
+
+        with patch(
+            "orchestrator.executor.docker_executor.subprocess.run",
+            side_effect=_fake_run,
+        ):
+            executor.start(plan)
+
+        assert ["docker", "network", "inspect", "build-net"] in calls
+        assert ["docker", "network", "create", "build-net"] in calls
+        run_cmds = [cmd for cmd in calls if cmd[:3] == ["docker", "run", "-d"]]
+        assert len(run_cmds) == 2
+        redis_cmd = next(cmd for cmd in run_cmds if "redis:7-alpine" in cmd)
+        assert "--network" in redis_cmd
+        assert "build-net" in redis_cmd
+        assert "--network-alias" in redis_cmd
+        assert "redis" in redis_cmd
+        assert "-v" in redis_cmd
+        assert "/host/cache:/data" in redis_cmd
+
+    def test_stop_stops_services_and_removes_created_network(
+        self, executor: DockerExecutor
+    ) -> None:
+        services = [
+            ServiceSpec(id="redis", image="redis:7-alpine", aliases=["redis"]),
+            ServiceSpec(id="queue", image="memcached:1.6", aliases=["cache-queue"]),
+        ]
+        plan = self._plan(network="build-net", services=services)
+
+        calls: list[list[str]] = []
+
+        def _fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            if cmd[:4] == ["docker", "network", "inspect", "build-net"]:
+                return subprocess.CompletedProcess(cmd, 1)
+            return subprocess.CompletedProcess(cmd, 0)
+
+        with patch(
+            "orchestrator.executor.docker_executor.subprocess.run",
+            side_effect=_fake_run,
+        ):
+            executor.start(plan)
+            executor.stop()
+
+        stop_calls = [cmd for cmd in calls if cmd[:2] == ["docker", "stop"]]
+        assert len(stop_calls) == 2
+        for call in stop_calls:
+            assert len(call) == 3
+            assert call[2].startswith("orch_service_")
+        assert ["docker", "network", "rm", "build-net"] in calls

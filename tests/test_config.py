@@ -51,6 +51,8 @@ class TestValidConfig:
         assert plan.max_parallel == 4
         assert plan.total_cpu_slots == 8
         assert plan.total_memory_slots == 8
+        assert plan.network is None
+        assert plan.services == []
         job = plan.jobs[0]
         assert job.resource_weight.cpu_slots == 1
         assert job.resource_weight.memory_slots == 1
@@ -116,6 +118,36 @@ class TestValidConfig:
         """)
         plan = loader.load(path)
         assert plan.jobs == []
+
+    def test_services_with_network(self, loader: YamlConfigLoader, tmp_path: Path) -> None:
+        path = _write_yaml(tmp_path, """\
+            network: ci-cache-net
+            services:
+              - id: redis
+                image: redis:7-alpine
+                aliases: [redis]
+                command: ["redis-server", "--appendonly", "yes"]
+                env_vars:
+                  REDIS_PASSWORD: secret
+                volumes:
+                  - host_path: /mnt/redis-cache
+                    container_path: /data
+            jobs:
+              - id: build
+                image: img:1
+        """)
+        plan = loader.load(path)
+
+        assert plan.network == "ci-cache-net"
+        assert len(plan.services) == 1
+        assert plan.services[0].id == "redis"
+        assert plan.services[0].image == "redis:7-alpine"
+        assert plan.services[0].aliases == ["redis"]
+        assert plan.services[0].command == ["redis-server", "--appendonly", "yes"]
+        assert plan.services[0].env_vars == {"REDIS_PASSWORD": "secret"}
+        assert len(plan.services[0].volumes) == 1
+        assert plan.services[0].volumes[0].host_path == "/mnt/redis-cache"
+        assert plan.services[0].volumes[0].container_path == "/data"
 
     def test_artifact_destination_subdir_defaults_to_empty(
         self, loader: YamlConfigLoader, tmp_path: Path
@@ -237,6 +269,18 @@ class TestSchemaViolations:
         with pytest.raises(ConfigurationError, match="missing 'source_glob'"):
             loader.load(path)
 
+    def test_service_requires_image(self, loader: YamlConfigLoader, tmp_path: Path) -> None:
+        path = _write_yaml(tmp_path, """\
+            network: ci-cache-net
+            services:
+              - id: redis
+            jobs:
+              - id: a
+                image: img:1
+        """)
+        with pytest.raises(ConfigurationError, match="services\\[0\\]: missing required key 'image'"):
+            loader.load(path)
+
 
 # ---------------------------------------------------------------------------
 # Validation errors
@@ -293,4 +337,33 @@ class TestValidationErrors:
                 cpu_slots: 0
         """)
         with pytest.raises(ConfigurationError, match="cpu_slots must be >= 1"):
+            loader.load(path)
+
+    def test_services_require_network(
+        self, loader: YamlConfigLoader, tmp_path: Path
+    ) -> None:
+        path = _write_yaml(tmp_path, """\
+            services:
+              - id: redis
+                image: redis:7-alpine
+            jobs:
+              - id: a
+                image: img:1
+        """)
+        with pytest.raises(ConfigurationError, match="services require network"):
+            loader.load(path)
+
+    def test_duplicate_service_id(self, loader: YamlConfigLoader, tmp_path: Path) -> None:
+        path = _write_yaml(tmp_path, """\
+            network: ci-cache-net
+            services:
+              - id: redis
+                image: redis:7-alpine
+              - id: redis
+                image: memcached:1.6
+            jobs:
+              - id: a
+                image: img:1
+        """)
+        with pytest.raises(ConfigurationError, match="Duplicate service id 'redis'"):
             loader.load(path)

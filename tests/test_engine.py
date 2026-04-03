@@ -43,6 +43,12 @@ class FakeExecutor(ExecutorABC):
         self._delay = delay
         self._pool = ThreadPoolExecutor(max_workers=4)
         self.submitted: list[str] = []
+        self.started = False
+        self.stopped = False
+
+    @override
+    def start(self, plan: BuildPlan) -> None:
+        self.started = True
 
     @override
     def submit(self, job: JobSpec) -> Future[JobResult]:
@@ -65,6 +71,10 @@ class FakeExecutor(ExecutorABC):
     @override
     def shutdown(self, wait: bool = True) -> None:
         self._pool.shutdown(wait=wait)
+
+    @override
+    def stop(self) -> None:
+        self.stopped = True
 
 
 class FakeArtifactStore(ArtifactStoreABC):
@@ -200,6 +210,8 @@ class TestHappyPath:
         assert result.success is True
         assert len(result.job_results) == 1
         assert result.job_results[0].job_id == "a"
+        assert ex.started is True
+        assert ex.stopped is True
 
     def test_linear_chain(self) -> None:
         """a → b → c executed in dependency order."""

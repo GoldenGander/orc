@@ -54,6 +54,18 @@ class ArtifactSpec:
 
 
 @dataclass
+class ServiceSpec:
+    """Pipeline-wide service container configuration."""
+
+    id: str
+    image: str
+    aliases: list[str] = field(default_factory=list)
+    command: list[str] | None = None
+    volumes: list[VolumeMount] = field(default_factory=list)
+    env_vars: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class JobSpec:
     """Complete specification for a single build job."""
 
@@ -87,6 +99,8 @@ class BuildPlan:
     max_parallel: int
     total_cpu_slots: int
     total_memory_slots: int
+    network: str | None = None
+    services: list[ServiceSpec] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

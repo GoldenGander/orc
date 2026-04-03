@@ -3,7 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from concurrent.futures import Future
 
-from orchestrator.models import JobResult, JobSpec
+from orchestrator.models import BuildPlan, JobResult, JobSpec
 
 
 class ExecutorABC(ABC):
@@ -30,6 +30,12 @@ class ExecutorABC(ABC):
             A Future that resolves to a JobResult when the container exits.
         """
         ...
+
+    def start(self, plan: BuildPlan) -> None:
+        """Optional lifecycle hook run once before job submission begins."""
+
+    def stop(self) -> None:
+        """Optional lifecycle hook run once after orchestration is finished."""
 
     @abstractmethod
     def shutdown(self, wait: bool = True) -> None:

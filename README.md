@@ -16,7 +16,7 @@ A Python-based build orchestration system designed for Azure DevOps pipelines. I
 
 ### Prerequisites
 
-- Python 3.11+
+- Python 3.12+
 - Docker (for running builds)
 - `uv` package manager (recommended)
 
@@ -57,6 +57,17 @@ failure_policy: fail_fast          # "fail_fast" stops on first failure; "contin
 max_parallel: 4                    # Max jobs running simultaneously
 total_cpu_slots: 8                 # Total CPU slots available (distributed by job)
 total_memory_slots: 8              # Total memory slots available (distributed by job)
+network: build-cache-net           # Optional shared container network for jobs/services
+services:                          # Optional pipeline-wide service containers
+  - id: redis
+    image: redis:7-alpine
+    aliases: [redis]               # Hostnames visible to jobs on network
+    command: ["redis-server", "--appendonly", "yes"]
+    env_vars:
+      REDIS_PASSWORD: "secret"
+    volumes:
+      - host_path: "/mnt/pipeline-cache/redis"
+        container_path: "/data"
 
 jobs:
   - id: my_job                     # Unique job identifier
@@ -84,6 +95,38 @@ The orchestrator automatically injects two system-managed volumes into every job
 | `/output` | Per-job output directory | Read-write | Write artifacts to be collected |
 
 Jobs can additionally declare user-managed volumes in the `volumes` array.
+
+If `services` are configured, each service container gets its own configured
+volumes. Service volumes are never mounted into build jobs.
+
+### Services + Network
+
+`services` are pipeline-wide service containers. They start before job dispatch,
+join `network`, and are stopped after orchestration completes.
+
+- Jobs only connect over `network`.
+- Use `aliases` (or service `id` by default) as DNS hostnames from jobs.
+- Use service `volumes` to persist data on the host machine.
+
+Example Redis usage from a job command:
+
+```yaml
+network: build-cache-net
+services:
+  - id: redis
+    image: redis:7-alpine
+    aliases: [redis]
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - host_path: "/mnt/pipeline-cache/redis"
+        container_path: "/data"
+
+jobs:
+  - id: build
+    image: alpine:latest
+    command: ["sh", "-c", "apk add --no-cache redis && redis-cli -h redis PING"]
+    artifacts: []
+```
 
 ### Example: Multi-Stage Build
 

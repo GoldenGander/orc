@@ -67,68 +67,72 @@ class Engine:
         in_flight: dict[Future[JobResult], str] = {}
         cancelling = False
 
-        while (completed | failed) != all_ids:
-            # ---- submit phase ----
-            if not cancelling:
-                ready = self._scheduler.ready_jobs(completed, failed)
-                for job_id in ready:
-                    if job_id in completed or job_id in failed:
-                        continue
-                    if job_id in self._scheduler.running_jobs:
-                        continue
-                    job = job_map[job_id]
-                    if not self._scheduler.can_dispatch(job):
-                        continue
-                    self._scheduler.acquire(job)
-                    self._reporter.report_job_started(job_id)
-                    logger.info("Submitting job %s", job_id)
-                    future = self._executor.submit(job)
-                    in_flight[future] = job_id
+        try:
+            self._executor.start(plan)
+            while (completed | failed) != all_ids:
+                # ---- submit phase ----
+                if not cancelling:
+                    ready = self._scheduler.ready_jobs(completed, failed)
+                    for job_id in ready:
+                        if job_id in completed or job_id in failed:
+                            continue
+                        if job_id in self._scheduler.running_jobs:
+                            continue
+                        job = job_map[job_id]
+                        if not self._scheduler.can_dispatch(job):
+                            continue
+                        self._scheduler.acquire(job)
+                        self._reporter.report_job_started(job_id)
+                        logger.info("Submitting job %s", job_id)
+                        future = self._executor.submit(job)
+                        in_flight[future] = job_id
 
-            # ---- stall detection ----
-            # No futures running and not all settled → remaining jobs are
-            # unreachable (blocked by failed dependencies or cancelled).
-            if not in_flight:
-                for job_id in all_ids - completed - failed:
-                    logger.info("Skipping unreachable job %s", job_id)
-                    results.append(
-                        JobResult(
-                            job_id=job_id,
-                            success=False,
-                            exit_code=-1,
-                            duration_seconds=0.0,
-                            log_path=self._job_logger.get_log_path(job_id),
+                # ---- stall detection ----
+                # No futures running and not all settled → remaining jobs are
+                # unreachable (blocked by failed dependencies or cancelled).
+                if not in_flight:
+                    for job_id in all_ids - completed - failed:
+                        logger.info("Skipping unreachable job %s", job_id)
+                        results.append(
+                            JobResult(
+                                job_id=job_id,
+                                success=False,
+                                exit_code=-1,
+                                duration_seconds=0.0,
+                                log_path=self._job_logger.get_log_path(job_id),
+                            )
                         )
-                    )
-                    failed.add(job_id)
-                break
+                        failed.add(job_id)
+                    break
 
-            # ---- wait phase ----
-            done, _ = wait(in_flight, return_when=FIRST_COMPLETED)
+                # ---- wait phase ----
+                done, _ = wait(in_flight, return_when=FIRST_COMPLETED)
 
-            for future in done:
-                job_id = in_flight.pop(future)
-                job = job_map[job_id]
-                result = future.result()
-                results.append(result)
-                self._scheduler.release(job)
+                for future in done:
+                    job_id = in_flight.pop(future)
+                    job = job_map[job_id]
+                    result = future.result()
+                    results.append(result)
+                    self._scheduler.release(job)
 
-                if result.success:
-                    completed.add(job_id)
-                    self._artifact_store.collect(job, result)
-                    self._reporter.report_job_completed(job_id, True)
-                    logger.info("Job %s succeeded (%.1fs)", job_id, result.duration_seconds)
-                else:
-                    failed.add(job_id)
-                    self._reporter.report_job_completed(job_id, False)
-                    logger.warning(
-                        "Job %s failed (exit %d, %.1fs)",
-                        job_id,
-                        result.exit_code,
-                        result.duration_seconds,
-                    )
-                    if plan.failure_policy == FailurePolicy.FAIL_FAST:
-                        cancelling = True
+                    if result.success:
+                        completed.add(job_id)
+                        self._artifact_store.collect(job, result)
+                        self._reporter.report_job_completed(job_id, True)
+                        logger.info("Job %s succeeded (%.1fs)", job_id, result.duration_seconds)
+                    else:
+                        failed.add(job_id)
+                        self._reporter.report_job_completed(job_id, False)
+                        logger.warning(
+                            "Job %s failed (exit %d, %.1fs)",
+                            job_id,
+                            result.exit_code,
+                            result.duration_seconds,
+                        )
+                        if plan.failure_policy == FailurePolicy.FAIL_FAST:
+                            cancelling = True
+        finally:
+            self._executor.stop()
 
         # ---- finalize ----
         self._artifact_store.finalize(self._output_root)
