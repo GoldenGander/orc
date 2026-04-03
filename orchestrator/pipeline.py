@@ -13,6 +13,7 @@ class AzureCliArgs:
 
     config_path: Path
     output_dir: Path
+    source_dir: Path
     dry_run: bool = False
 
 

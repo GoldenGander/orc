@@ -14,6 +14,7 @@ from orchestrator.models import (
     FailurePolicy,
     JobSpec,
     ResourceWeight,
+    VolumeMount,
 )
 
 
@@ -23,6 +24,15 @@ class RawArtifactConfig:
 
     source_glob: str
     destination_subdir: str = ""
+
+
+@dataclass
+class RawVolumeConfig:
+    """Schema for a single volume mount entry in the YAML configuration."""
+
+    host_path: str
+    container_path: str
+    read_only: bool = False
 
 
 @dataclass
@@ -36,6 +46,7 @@ class RawJobConfig:
     cpu_slots: int = 1
     memory_slots: int = 1
     artifacts: list[RawArtifactConfig] = field(default_factory=list)
+    volumes: list[RawVolumeConfig] = field(default_factory=list)
     env_vars: dict[str, str] = field(default_factory=dict)
 
 
@@ -203,6 +214,14 @@ class YamlConfigLoader(IConfigLoader):
                     for a in rj.artifacts
                 ],
                 command=rj.command,
+                volumes=[
+                    VolumeMount(
+                        host_path=v.host_path,
+                        container_path=v.container_path,
+                        read_only=v.read_only,
+                    )
+                    for v in rj.volumes
+                ],
                 env_vars=rj.env_vars,
             )
             for rj in raw.jobs
@@ -252,6 +271,28 @@ def _parse_job(entry: dict[str, Any], index: int) -> RawJobConfig:
             )
         )
 
+    volumes: list[RawVolumeConfig] = []
+    for j, vol in enumerate(entry.get("volumes", [])):
+        if not isinstance(vol, dict):
+            raise ConfigurationError(f"{prefix}.volumes[{j}]: expected a mapping")
+        for req_key in ("host_path", "container_path"):
+            if req_key not in vol:
+                raise ConfigurationError(
+                    f"{prefix}.volumes[{j}]: missing '{req_key}'"
+                )
+        read_only = vol.get("read_only", False)
+        if not isinstance(read_only, bool):
+            raise ConfigurationError(
+                f"{prefix}.volumes[{j}].read_only: expected a boolean"
+            )
+        volumes.append(
+            RawVolumeConfig(
+                host_path=str(vol["host_path"]),
+                container_path=str(vol["container_path"]),
+                read_only=read_only,
+            )
+        )
+
     env_vars = entry.get("env_vars", {})
     if not isinstance(env_vars, dict):
         raise ConfigurationError(f"{prefix}.env_vars: expected a mapping")
@@ -265,6 +306,7 @@ def _parse_job(entry: dict[str, Any], index: int) -> RawJobConfig:
         cpu_slots=_expect_int(entry, "cpu_slots", default=1, prefix=prefix),
         memory_slots=_expect_int(entry, "memory_slots", default=1, prefix=prefix),
         artifacts=artifacts,
+        volumes=volumes,
         env_vars=env_vars,
     )
 

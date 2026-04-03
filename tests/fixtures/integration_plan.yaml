@@ -1,0 +1,37 @@
+failure_policy: fail_fast
+max_parallel: 2
+total_cpu_slots: 4
+total_memory_slots: 4
+
+jobs:
+  - id: greeting
+    image: alpine:latest
+    command: ["echo", "hello from greeting"]
+    cpu_slots: 1
+    memory_slots: 1
+    depends_on: []
+    artifacts: []
+
+  - id: farewell
+    image: alpine:latest
+    command: ["echo", "goodbye from farewell"]
+    cpu_slots: 1
+    memory_slots: 1
+    depends_on: ["greeting"]
+    artifacts: []
+
+  - id: parallel_a
+    image: alpine:latest
+    command: ["sh", "-c", "echo side-a && sleep 0.1"]
+    cpu_slots: 1
+    memory_slots: 1
+    depends_on: []
+    artifacts: []
+
+  - id: final
+    image: alpine:latest
+    command: ["echo", "done"]
+    cpu_slots: 2
+    memory_slots: 2
+    depends_on: ["farewell", "parallel_a"]
+    artifacts: []

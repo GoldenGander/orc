@@ -32,6 +32,20 @@ class ResourceWeight:
 
 
 @dataclass(frozen=True)
+class VolumeMount:
+    """A bind mount from the host into the container.
+
+    host_path:      Absolute path on the host machine.
+    container_path: Absolute path inside the container.
+    read_only:      If True the mount is read-only inside the container.
+    """
+
+    host_path: str
+    container_path: str
+    read_only: bool = False
+
+
+@dataclass(frozen=True)
 class ArtifactSpec:
     """Describes a set of files to collect as artifacts after a build."""
 
@@ -49,6 +63,7 @@ class JobSpec:
     resource_weight: ResourceWeight
     artifacts: list[ArtifactSpec]
     command: list[str] | None = None
+    volumes: list[VolumeMount] = field(default_factory=list)
     env_vars: dict[str, str] = field(default_factory=dict)
 
 

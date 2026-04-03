@@ -37,6 +37,11 @@ class DockerExecutor(ExecutorABC):
 
     def _build_docker_command(self, job: JobSpec) -> list[str]:
         cmd: list[str] = ["docker", "run", "--rm"]
+        for vol in job.volumes:
+            mount = f"{vol.host_path}:{vol.container_path}"
+            if vol.read_only:
+                mount += ":ro"
+            cmd.extend(["-v", mount])
         for key, value in job.env_vars.items():
             cmd.extend(["-e", f"{key}={value}"])
         cmd.append(job.image)
