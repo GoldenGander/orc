@@ -1,0 +1,82 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+from pathlib import Path
+
+
+class FailurePolicy(Enum):
+    FAIL_FAST = "fail_fast"
+    CONTINUE = "continue"
+
+
+class JobStatus(Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCESS = "success"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+@dataclass(frozen=True)
+class ResourceWeight:
+    """Relative resource cost of a job expressed in abstract slot units.
+
+    Slot counts are not tied to physical resources — they are relative weights
+    declared per-job so the scheduler can prevent resource overcommit without
+    needing to introspect process memory at runtime.
+    """
+
+    cpu_slots: int = 1
+    memory_slots: int = 1
+
+
+@dataclass(frozen=True)
+class ArtifactSpec:
+    """Describes a set of files to collect as artifacts after a build."""
+
+    source_glob: str
+    destination_subdir: str
+
+
+@dataclass
+class JobSpec:
+    """Complete specification for a single build job."""
+
+    id: str
+    image: str
+    depends_on: frozenset[str]
+    resource_weight: ResourceWeight
+    artifacts: list[ArtifactSpec]
+    command: list[str] | None = None
+    env_vars: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class JobResult:
+    """Outcome of executing a single build job."""
+
+    job_id: str
+    success: bool
+    exit_code: int
+    duration_seconds: float
+    log_path: Path
+
+
+@dataclass
+class BuildPlan:
+    """Complete orchestration plan derived from a configuration file."""
+
+    jobs: list[JobSpec]
+    failure_policy: FailurePolicy
+    max_parallel: int
+    total_cpu_slots: int
+    total_memory_slots: int
+
+
+@dataclass(frozen=True)
+class OrchestratorResult:
+    """Final result returned to the Azure DevOps pipeline."""
+
+    success: bool
+    job_results: tuple[JobResult, ...]
