@@ -1,49 +1,57 @@
-﻿Core Requirements
+Core Requirements
 1. Execution Model
 A single on-prem Azure DevOps agent initiates all builds.
-Build orchestration (ordering, parallelism, execution) is handled entirely by a custom script, not the agent.
+Build orchestration (ordering, parallelism, execution) is handled entirely by a custom Python script, not the agent.
+
 2. Supported Build Types
-Must support:
-Qt for WebAssembly builds (Emscripten-based)
-Visual Studio / MSBuild projects
-Each project declares its build type and required environment.
+Build execution is container-based — the orchestrator is agnostic to what runs inside the container.
+Each job declares a Docker image and an optional command.
+If no command is provided, the image's default entrypoint is used.
+New build types require no changes to orchestration logic — only a new image.
+
 3. Dependency Handling
 Builds are defined as a dependency graph.
 The system must:
 enforce dependency order
-allow parallel execution of independent projects
+allow parallel execution of independent jobs
+
 4. Parallel Execution Control
 Parallelism is controlled by the orchestration layer.
 The system must:
 support configurable concurrency limits
-prevent resource overcommit (especially RAM)
-allow reduced concurrency for high-memory jobs (e.g., Wasm optimization)
+prevent resource overcommit via slot-based resource weights
+allow reduced concurrency for high-resource jobs by declaring higher slot costs
+
 5. Environment Isolation
-Build jobs must run in isolated environments (containerized or equivalent).
-Toolchains (Qt, Emscripten, MSBuild, SDKs) must not conflict across jobs.
+Each build job runs in an isolated Docker container.
+Toolchains and dependencies are encapsulated in the image and do not conflict across jobs.
+
 6. Resource Awareness
-Each job must declare resource expectations (at least relative weight or class).
-Scheduler must respect CPU and memory constraints when dispatching jobs.
-7. Workspace Isolation
-Each job runs in an isolated working directory.
-Builds must not interfere with each other’s intermediate or output files.
-8. Artifacts and Outputs
-Each project defines its output artifacts.
-All artifacts must be collected into a unified output structure.
-9. Failure Handling
+Each job declares relative resource weight (cpu_slots, memory_slots).
+The scheduler must respect total slot budgets when dispatching jobs.
+Slot units are abstract — they express relative cost, not raw CPU cores or RAM bytes.
+
+7. Artifacts and Outputs
+Each job defines its output artifacts via glob patterns.
+All artifacts must be collected into a unified output directory after the run.
+
+8. Failure Handling
 The system must:
 detect and report per-job failures
 return a single success/failure result to the pipeline
 Failure policy (fail-fast vs continue) must be configurable.
-10. Logging
+
+9. Logging
 Each job must produce isolated logs.
-Logs must be attributable to specific projects and build steps.
-11. Azure DevOps Integration
+Logs must be attributable to specific jobs.
+
+10. Azure DevOps Integration
 The orchestration script must integrate with the existing pipeline.
 The pipeline must:
 trigger the build
 receive final status
 publish artifacts
-12. Configuration-Driven Design
-Projects must be defined via configuration (not hardcoded).
-Adding or modifying projects must not require changes to orchestration logic.
+
+11. Configuration-Driven Design
+Jobs must be defined via configuration (not hardcoded).
+Adding or modifying jobs must not require changes to orchestration logic.
