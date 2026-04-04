@@ -18,6 +18,16 @@ class JobStatus(Enum):
     SKIPPED = "skipped"
 
 
+class ResourceLifetime(Enum):
+    MANAGED = "managed"
+    EXTERNAL = "external"
+
+
+class ResourceDriver(Enum):
+    DOCKER_CONTAINER = "docker_container"
+    EXTERNAL = "external"
+
+
 @dataclass(frozen=True)
 class ResourceWeight:
     """Relative resource cost of a job expressed in abstract slot units.
@@ -54,13 +64,23 @@ class ArtifactSpec:
 
 
 @dataclass
-class ServiceSpec:
-    """Pipeline-wide service container configuration."""
+class ResourceSpec:
+    """Pipeline-wide shared resource configuration.
+
+    Resources are shared infrastructure that jobs may depend on. A resource may
+    be managed by the orchestrator for the lifetime of the plan, or it may be
+    an external dependency the plan simply references.
+    """
 
     id: str
-    image: str
+    kind: str = "generic"
+    lifetime: ResourceLifetime = ResourceLifetime.MANAGED
+    driver: ResourceDriver = ResourceDriver.DOCKER_CONTAINER
+    image: str | None = None
+    endpoint: str | None = None
     aliases: list[str] = field(default_factory=list)
     command: list[str] | None = None
+    artifacts: list[ArtifactSpec] = field(default_factory=list)
     volumes: list[VolumeMount] = field(default_factory=list)
     env_vars: dict[str, str] = field(default_factory=dict)
 
@@ -75,6 +95,7 @@ class JobSpec:
     resource_weight: ResourceWeight
     artifacts: list[ArtifactSpec]
     command: list[str] | None = None
+    timeout_seconds: int | None = None
     volumes: list[VolumeMount] = field(default_factory=list)
     env_vars: dict[str, str] = field(default_factory=dict)
 
@@ -99,8 +120,9 @@ class BuildPlan:
     max_parallel: int
     total_cpu_slots: int
     total_memory_slots: int
-    network: str | None = None
-    services: list[ServiceSpec] = field(default_factory=list)
+    job_timeout_seconds: int | None = 3600
+    resource_network: str | None = None
+    resources: list[ResourceSpec] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
