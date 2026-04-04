@@ -12,7 +12,6 @@ from orchestrator.models import (
     FailurePolicy,
     JobSpec,
     ResourceDriver,
-    ResourceLifetime,
     ResourceSpec,
     ResourceWeight,
     VolumeMount,
@@ -43,7 +42,6 @@ def _resource(
     return ResourceSpec(
         id=resource_id,
         kind="cache",
-        lifetime=ResourceLifetime.MANAGED,
         driver=ResourceDriver.DOCKER_CONTAINER,
         image=f"registry/{resource_id}:latest",
         artifacts=[ArtifactSpec(source_glob="*.txt", destination_subdir=resource_id)],
@@ -182,3 +180,94 @@ class TestPrepareVolumes:
 
         with pytest.raises(ConfigurationError, match="single path component|Windows reserved name"):
             prepare_volumes(plan, source, tmp_path / "out")
+
+    def test_file_share_not_given_output_mount(self, tmp_path: Path) -> None:
+        source = tmp_path / "src"
+        source.mkdir()
+        share = ResourceSpec(
+            id="boost",
+            driver=ResourceDriver.FILE_SHARE,
+            host_path="/mnt/boost",
+            container_path="/opt/boost",
+            aliases=[],
+        )
+        plan = _plan([], resources=[share])
+
+        prepare_volumes(plan, source, tmp_path / "out")
+
+        output_vols = [v for v in share.volumes if v.container_path == CONTAINER_OUTPUT_PATH]
+        assert output_vols == []
+
+    def test_file_share_injected_as_read_only_mount_into_declaring_job(
+        self, tmp_path: Path
+    ) -> None:
+        source = tmp_path / "src"
+        source.mkdir()
+        share = ResourceSpec(
+            id="boost",
+            driver=ResourceDriver.FILE_SHARE,
+            host_path="/mnt/boost",
+            container_path="/opt/boost",
+            aliases=[],
+        )
+        job = _job("compile")
+        job.resources = ["boost"]
+        plan = _plan([job], resources=[share])
+
+        prepare_volumes(plan, source, tmp_path / "out")
+
+        share_vols = [v for v in job.volumes if v.container_path == "/opt/boost"]
+        assert len(share_vols) == 1
+        assert share_vols[0].host_path == "/mnt/boost"
+        assert share_vols[0].read_only is True
+
+    def test_job_without_resource_declaration_gets_no_share_mount(
+        self, tmp_path: Path
+    ) -> None:
+        source = tmp_path / "src"
+        source.mkdir()
+        share = ResourceSpec(
+            id="boost",
+            driver=ResourceDriver.FILE_SHARE,
+            host_path="/mnt/boost",
+            container_path="/opt/boost",
+            aliases=[],
+        )
+        job = _job("compile")
+        plan = _plan([job], resources=[share])
+
+        prepare_volumes(plan, source, tmp_path / "out")
+
+        share_vols = [v for v in job.volumes if v.container_path == "/opt/boost"]
+        assert share_vols == []
+
+    def test_multiple_file_shares_injected_for_single_job(self, tmp_path: Path) -> None:
+        source = tmp_path / "src"
+        source.mkdir()
+        boost = ResourceSpec(
+            id="boost",
+            driver=ResourceDriver.FILE_SHARE,
+            host_path="/mnt/boost",
+            container_path="/opt/boost",
+            aliases=[],
+        )
+        tools = ResourceSpec(
+            id="tools",
+            driver=ResourceDriver.FILE_SHARE,
+            host_path="/mnt/tools",
+            container_path="/opt/tools",
+            aliases=[],
+        )
+        job = _job("compile")
+        job.resources = ["boost", "tools"]
+        plan = _plan([job], resources=[boost, tools])
+
+        prepare_volumes(plan, source, tmp_path / "out")
+
+        mounted = {v.container_path: v for v in job.volumes}
+        assert "/opt/boost" in mounted
+        assert mounted["/opt/boost"].host_path == "/mnt/boost"
+        assert mounted["/opt/boost"].read_only is True
+        assert "/opt/tools" in mounted
+        assert mounted["/opt/tools"].host_path == "/mnt/tools"
+        assert mounted["/opt/tools"].read_only is True

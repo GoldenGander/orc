@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from orchestrator.models import BuildPlan, VolumeMount
+from orchestrator.models import BuildPlan, ResourceDriver, VolumeMount
 from orchestrator.path_safety import require_safe_path_component
 
 CONTAINER_SOURCE_PATH = "/src"
@@ -43,6 +43,12 @@ def prepare_volumes(
         container_output_root: Absolute host path under which per-job
             and per-resource output directories are created.
     """
+    file_shares = {
+        resource.id: resource
+        for resource in plan.resources
+        if resource.driver == ResourceDriver.FILE_SHARE
+    }
+
     for job in plan.jobs:
         job_output_dir = container_output_root / require_safe_path_component(
             job.id, owner_label="Job", field_name="id"
@@ -64,8 +70,18 @@ def prepare_volumes(
             )
         )
 
+        for resource_id in job.resources:
+            share = file_shares[resource_id]
+            job.volumes.append(
+                VolumeMount(
+                    host_path=share.host_path,
+                    container_path=share.container_path,
+                    read_only=True,
+                )
+            )
+
     for resource in plan.resources:
-        if resource.lifetime.value != "managed":
+        if resource.driver != ResourceDriver.DOCKER_CONTAINER:
             continue
         resource_output_dir = container_output_root / RESOURCE_OUTPUT_DIRNAME / require_safe_path_component(
             resource.id, owner_label="Resource", field_name="id"

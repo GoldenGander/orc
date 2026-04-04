@@ -42,14 +42,18 @@ class RecordingReporter(IPipelineReporter):
         self.started: list[str] = []
         self.completed: list[tuple[str, bool]] = []
         self.final_result: OrchestratorResult | None = None
+        # Ordered log of ("started"|"completed", job_id) for ordering assertions.
+        self._event_log: list[tuple[str, str]] = []
 
     @override
     def report_job_started(self, job_id: str) -> None:
         self.started.append(job_id)
+        self._event_log.append(("started", job_id))
 
     @override
     def report_job_completed(self, job_id: str, success: bool) -> None:
         self.completed.append((job_id, success))
+        self._event_log.append(("completed", job_id))
 
     @override
     def report_result(self, result: OrchestratorResult) -> None:
@@ -355,69 +359,86 @@ jobs:
         self,
         tmp_path: Path,
     ) -> None:
-        """The same plan uses a stable Redis host volume so the second run hits the cache on the same host."""
+        """Three-job DAG (compile_a + compile_b in parallel → report) run twice.
+
+        Verifies across both runs:
+        - All jobs succeed and artifacts land in their declared subdirectories.
+        - Dependency ordering: report starts only after both compile jobs complete.
+        - Redis cache: first run populates the cache (misses), second run hits it.
+        """
         image_tag = f"build-orch-sccache-test:{uuid4().hex[:12]}"
         _build_test_image(FIXTURES_DIR / "sccache_consumer", image_tag)
 
         try:
-            fixture_dir = FIXTURES_DIR / "sccache_redis"
+            fixture_dir = FIXTURES_DIR / "sccache_orchestration"
             redis_host_path = (tmp_path / "redis-cache").resolve()
             redis_host_path.mkdir()
 
-            seed_tmp = tmp_path / "seed"
-            seed_tmp.mkdir()
-            seed_plan = seed_tmp / "plan.yaml"
-            _render_fixture_template(
-                fixture_dir / "plan.yaml.tmpl",
-                seed_plan,
-                network=f"redis-seed-{uuid4().hex[:10]}",
-                image_tag=image_tag,
-                redis_host_path=redis_host_path.as_posix(),
-            )
+            def _run(run_tmp: Path) -> tuple[OrchestratorResult, RecordingReporter, Path]:
+                run_tmp.mkdir()
+                plan_path = run_tmp / "plan.yaml"
+                _render_fixture_template(
+                    fixture_dir / "plan.yaml.tmpl",
+                    plan_path,
+                    network=f"orch-{uuid4().hex[:10]}",
+                    image_tag=image_tag,
+                    redis_host_path=redis_host_path.as_posix(),
+                )
+                return _run_plan(plan_path, run_tmp, source_fixture_dir=fixture_dir)
 
-            seed_result, seed_reporter, seed_output = _run_plan(
-                seed_plan,
-                seed_tmp,
-                source_fixture_dir=fixture_dir,
-            )
-            assert seed_result.success is True
-            assert seed_reporter.final_result is not None
-            assert seed_reporter.final_result.success is True
+            def _assert_common(
+                result: OrchestratorResult,
+                reporter: RecordingReporter,
+                output: Path,
+            ) -> None:
+                assert result.success is True
+                assert {r.job_id for r in result.job_results} == {"compile_a", "compile_b", "report"}
+                assert all(r.success for r in result.job_results)
 
-            restored_tmp = tmp_path / "restored"
-            restored_tmp.mkdir()
-            restore_plan = restored_tmp / "plan.yaml"
-            _render_fixture_template(
-                fixture_dir / "plan.yaml.tmpl",
-                restore_plan,
-                network=f"redis-restore-{uuid4().hex[:10]}",
-                image_tag=image_tag,
-                redis_host_path=redis_host_path.as_posix(),
-            )
+                assert set(reporter.started) == {"compile_a", "compile_b", "report"}
+                assert {jid for jid, _ in reporter.completed} == {"compile_a", "compile_b", "report"}
+                assert all(ok for _, ok in reporter.completed)
 
-            restore_result, restore_reporter, restore_output = _run_plan(
-                restore_plan,
-                restored_tmp,
-                source_fixture_dir=fixture_dir,
-            )
+                # artifact routing: each glob lands in its declared destination_subdir
+                assert (output / "objects" / "file_a.o").exists()
+                assert (output / "objects" / "file_b.o").exists()
+                assert (output / "stats" / "stats_a.json").exists()
+                assert (output / "stats" / "stats_b.json").exists()
+                assert (output / "summary" / "summary.txt").exists()
 
-            assert restore_result.success is True
-            assert restore_reporter.final_result is not None
-            assert restore_reporter.final_result.success is True
+                # ordering: report must start after both compile jobs have completed
+                # (and had their artifacts collected — the engine fires report_job_completed
+                # after artifact_store.collect(), so the event log is a faithful record)
+                pos = {event: i for i, event in enumerate(reporter._event_log)}
+                assert pos[("started", "report")] > pos[("completed", "compile_a")]
+                assert pos[("started", "report")] > pos[("completed", "compile_b")]
 
-            seed_stats = json.loads((seed_output / "combined" / "sccache-stats.json").read_text())["stats"]
-            restore_stats = json.loads((restore_output / "combined" / "sccache-stats.json").read_text())["stats"]
+            # ---- first run: seed the cache ----
+            seed_result, seed_reporter, seed_output = _run(tmp_path / "seed")
+            _assert_common(seed_result, seed_reporter, seed_output)
+
+            seed_a = json.loads((seed_output / "stats" / "stats_a.json").read_text())["stats"]
+            seed_b = json.loads((seed_output / "stats" / "stats_b.json").read_text())["stats"]
+            assert seed_a["cache_misses"]["counts"]["C/C++"] >= 1
+            assert seed_a["cache_hits"]["counts"].get("C/C++", 0) == 0
+            assert seed_b["cache_misses"]["counts"]["C/C++"] >= 1
+            assert seed_b["cache_hits"]["counts"].get("C/C++", 0) == 0
 
             dump_file = redis_host_path / "dump.rdb"
             assert dump_file.exists()
             assert dump_file.stat().st_size > 0
-            assert seed_stats["compile_requests"] >= 1
-            assert seed_stats["cache_writes"] >= 1
-            assert seed_stats["cache_misses"]["counts"]["C/C++"] >= 1
-            assert seed_stats["cache_hits"]["counts"].get("C/C++", 0) == 0
-            assert restore_stats["compile_requests"] >= 1
-            assert restore_stats["cache_hits"]["counts"]["C/C++"] >= 1
-            assert restore_stats["cache_misses"]["counts"].get("C/C++", 0) == 0
+
+            # ---- second run: restore from cache ----
+            restore_result, restore_reporter, restore_output = _run(tmp_path / "restored")
+            _assert_common(restore_result, restore_reporter, restore_output)
+
+            restore_a = json.loads((restore_output / "stats" / "stats_a.json").read_text())["stats"]
+            restore_b = json.loads((restore_output / "stats" / "stats_b.json").read_text())["stats"]
+            assert restore_a["cache_hits"]["counts"]["C/C++"] >= 1
+            assert restore_a["cache_misses"]["counts"].get("C/C++", 0) == 0
+            assert restore_b["cache_hits"]["counts"]["C/C++"] >= 1
+            assert restore_b["cache_misses"]["counts"].get("C/C++", 0) == 0
+
         finally:
             _remove_test_image(image_tag)
 

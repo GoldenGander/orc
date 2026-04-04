@@ -15,7 +15,6 @@ from orchestrator.models import (
     FailurePolicy,
     JobSpec,
     ResourceDriver,
-    ResourceLifetime,
     ResourceSpec,
     ResourceWeight,
     VolumeMount,
@@ -53,6 +52,7 @@ class RawJobConfig:
     artifacts: list[RawArtifactConfig] = field(default_factory=list)
     volumes: list[RawVolumeConfig] = field(default_factory=list)
     env_vars: dict[str, str] = field(default_factory=dict)
+    resources: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -61,9 +61,10 @@ class RawResourceConfig:
 
     id: str
     kind: str = "generic"
-    lifetime: str = ResourceLifetime.MANAGED.value
     driver: str = ResourceDriver.DOCKER_CONTAINER.value
     image: str | None = None
+    host_path: str | None = None
+    container_path: str | None = None
     aliases: list[str] = field(default_factory=list)
     command: list[str] | None = None
     artifacts: list[RawArtifactConfig] = field(default_factory=list)
@@ -249,10 +250,6 @@ class YamlConfigLoader(IConfigLoader):
             if resource.id in seen_resource_ids:
                 raise ConfigurationError(f"Duplicate resource id '{resource.id}'")
             seen_resource_ids.add(resource.id)
-            if resource.lifetime not in {l.value for l in ResourceLifetime}:
-                raise ConfigurationError(
-                    f"Resource '{resource.id}': invalid lifetime '{resource.lifetime}'"
-                )
             if resource.driver not in {d.value for d in ResourceDriver}:
                 raise ConfigurationError(
                     f"Resource '{resource.id}': invalid driver '{resource.driver}'"
@@ -265,13 +262,54 @@ class YamlConfigLoader(IConfigLoader):
                         f"Resource '{resource.id}': aliases must not be empty"
                     )
             if resource.driver == ResourceDriver.DOCKER_CONTAINER.value:
-                if resource.lifetime != ResourceLifetime.MANAGED.value:
-                    raise ConfigurationError(
-                        f"Resource '{resource.id}': docker_container resources must use lifetime 'managed'"
-                    )
                 if not resource.image:
                     raise ConfigurationError(
                         f"Resource '{resource.id}': image must not be empty for managed docker_container resources"
+                    )
+                if resource.host_path is not None:
+                    raise ConfigurationError(
+                        f"Resource '{resource.id}': host_path is not supported for docker_container resources"
+                    )
+                if resource.container_path is not None:
+                    raise ConfigurationError(
+                        f"Resource '{resource.id}': container_path is not supported for docker_container resources"
+                    )
+            if resource.driver == ResourceDriver.FILE_SHARE.value:
+                if not resource.host_path:
+                    raise ConfigurationError(
+                        f"Resource '{resource.id}': host_path must not be empty for file_share resources"
+                    )
+                if not resource.container_path:
+                    raise ConfigurationError(
+                        f"Resource '{resource.id}': container_path must not be empty for file_share resources"
+                    )
+                if not resource.container_path.startswith("/"):
+                    raise ConfigurationError(
+                        f"Resource '{resource.id}': container_path must be an absolute path"
+                    )
+                if resource.image:
+                    raise ConfigurationError(
+                        f"Resource '{resource.id}': image is not supported for file_share resources"
+                    )
+                if resource.command is not None:
+                    raise ConfigurationError(
+                        f"Resource '{resource.id}': command is not supported for file_share resources"
+                    )
+                if resource.aliases:
+                    raise ConfigurationError(
+                        f"Resource '{resource.id}': aliases are not supported for file_share resources"
+                    )
+                if resource.artifacts:
+                    raise ConfigurationError(
+                        f"Resource '{resource.id}': artifacts are not supported for file_share resources"
+                    )
+                if resource.env_vars:
+                    raise ConfigurationError(
+                        f"Resource '{resource.id}': env_vars are not supported for file_share resources"
+                    )
+                if resource.volumes:
+                    raise ConfigurationError(
+                        f"Resource '{resource.id}': volumes are not supported for file_share resources"
                     )
             for index, artifact in enumerate(resource.artifacts):
                 _validate_artifact_destination_subdir(
@@ -279,6 +317,30 @@ class YamlConfigLoader(IConfigLoader):
                     owner_label=f"Resource '{resource.id}'",
                     artifact_index=index,
                 )
+
+        file_share_ids = {
+            r.id
+            for r in raw.resources
+            if r.driver == ResourceDriver.FILE_SHARE.value
+        }
+        all_resource_ids = {r.id for r in raw.resources}
+        for job in raw.jobs:
+            seen_job_resources: set[str] = set()
+            for resource_id in job.resources:
+                if resource_id not in all_resource_ids:
+                    raise ConfigurationError(
+                        f"Job '{job.id}': resources references unknown resource '{resource_id}'"
+                    )
+                if resource_id not in file_share_ids:
+                    raise ConfigurationError(
+                        f"Job '{job.id}': resources can only reference file_share resources, "
+                        f"'{resource_id}' is not a file_share"
+                    )
+                if resource_id in seen_job_resources:
+                    raise ConfigurationError(
+                        f"Job '{job.id}': duplicate resource reference '{resource_id}'"
+                    )
+                seen_job_resources.add(resource_id)
 
     # ------------------------------------------------------------------
     # Conversion
@@ -313,6 +375,7 @@ class YamlConfigLoader(IConfigLoader):
                     for v in rj.volumes
                 ],
                 env_vars=rj.env_vars,
+                resources=rj.resources,
             )
             for rj in raw.jobs
         ]
@@ -328,9 +391,10 @@ class YamlConfigLoader(IConfigLoader):
                 ResourceSpec(
                     id=resource.id,
                     kind=resource.kind,
-                    lifetime=ResourceLifetime(resource.lifetime),
                     driver=ResourceDriver(resource.driver),
                     image=resource.image,
+                    host_path=resource.host_path,
+                    container_path=resource.container_path,
                     aliases=resource.aliases if resource.aliases else [resource.id],
                     command=resource.command,
                     artifacts=[
@@ -389,6 +453,10 @@ def _parse_job(entry: dict[str, Any], index: int) -> RawJobConfig:
         raise ConfigurationError(f"{prefix}.env_vars: expected a mapping")
     env_vars = {str(k): str(v) for k, v in env_vars.items()}
 
+    resources = entry.get("resources", [])
+    if not isinstance(resources, list) or not all(isinstance(r, str) for r in resources):
+        raise ConfigurationError(f"{prefix}.resources: expected a list of strings")
+
     return RawJobConfig(
         id=entry["id"],
         image=entry["image"],
@@ -400,6 +468,7 @@ def _parse_job(entry: dict[str, Any], index: int) -> RawJobConfig:
         artifacts=_parse_artifacts(entry.get("artifacts", []), prefix=f"{prefix}.artifacts"),
         volumes=volumes,
         env_vars=env_vars,
+        resources=resources,
     )
 
 
@@ -491,15 +560,18 @@ def _parse_resources(raw_resources: Any) -> list[RawResourceConfig]:
         kind = raw_resource.get("kind", "generic")
         if not isinstance(kind, str):
             raise ConfigurationError(f"{prefix}.kind: expected a string")
-        lifetime = raw_resource.get("lifetime", ResourceLifetime.MANAGED.value)
-        if not isinstance(lifetime, str):
-            raise ConfigurationError(f"{prefix}.lifetime: expected a string")
         driver = raw_resource.get("driver", ResourceDriver.DOCKER_CONTAINER.value)
         if not isinstance(driver, str):
             raise ConfigurationError(f"{prefix}.driver: expected a string")
         image = raw_resource.get("image")
         if image is not None and not isinstance(image, str):
             raise ConfigurationError(f"{prefix}.image: expected a string or null")
+        host_path = raw_resource.get("host_path")
+        if host_path is not None and not isinstance(host_path, str):
+            raise ConfigurationError(f"{prefix}.host_path: expected a string or null")
+        container_path = raw_resource.get("container_path")
+        if container_path is not None and not isinstance(container_path, str):
+            raise ConfigurationError(f"{prefix}.container_path: expected a string or null")
         aliases = raw_resource.get("aliases", [])
         if not isinstance(aliases, list) or not all(isinstance(a, str) for a in aliases):
             raise ConfigurationError(f"{prefix}.aliases: expected a list of strings")
@@ -517,9 +589,10 @@ def _parse_resources(raw_resources: Any) -> list[RawResourceConfig]:
             RawResourceConfig(
                 id=resource_id,
                 kind=kind,
-                lifetime=lifetime,
                 driver=driver,
                 image=image,
+                host_path=host_path,
+                container_path=container_path,
                 aliases=aliases,
                 command=command,
                 artifacts=_parse_artifacts(

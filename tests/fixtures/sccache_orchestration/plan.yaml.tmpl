@@ -1,0 +1,66 @@
+failure_policy: fail_fast
+max_parallel: 3
+total_cpu_slots: 6
+total_memory_slots: 6
+resource_network: {network}
+
+resources:
+  - id: redis
+    kind: cache
+    driver: docker_container
+    image: redis:7-alpine
+    aliases: [redis]
+    command:
+      - redis-server
+      - --bind
+      - 0.0.0.0
+      - --protected-mode
+      - "no"
+      - --port
+      - "6379"
+      - --dir
+      - /var/lib/redis
+      - --dbfilename
+      - dump.rdb
+      - --save
+      - "1 1"
+      - --appendonly
+      - "no"
+    volumes:
+      - host_path: "{redis_host_path}"
+        container_path: /var/lib/redis
+
+jobs:
+  - id: compile_a
+    image: {image_tag}
+    command: ["bash", "/src/compile_a.sh"]
+    cpu_slots: 2
+    memory_slots: 2
+    depends_on: []
+    artifacts:
+      - source_glob: "*.o"
+        destination_subdir: objects
+      - source_glob: "*.json"
+        destination_subdir: stats
+
+  - id: compile_b
+    image: {image_tag}
+    command: ["bash", "/src/compile_b.sh"]
+    cpu_slots: 2
+    memory_slots: 2
+    depends_on: []
+    artifacts:
+      - source_glob: "*.o"
+        destination_subdir: objects
+      - source_glob: "*.json"
+        destination_subdir: stats
+
+  - id: report
+    image: alpine:latest
+    command: ["sh", "-c", "echo 'pipeline complete' > /output/summary.txt"]
+    cpu_slots: 1
+    memory_slots: 1
+    depends_on: ["compile_a", "compile_b"]
+    artifacts:
+      - source_glob: "*.txt"
+        destination_subdir: summary

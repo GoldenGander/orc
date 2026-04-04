@@ -16,7 +16,6 @@ from orchestrator.models import (
     JobResult,
     JobSpec,
     ResourceDriver,
-    ResourceLifetime,
     ResourceSpec,
 )
 
@@ -52,15 +51,19 @@ class DockerExecutor(ExecutorABC):
         self._default_job_timeout_seconds = plan.job_timeout_seconds
         managed_container_resources: list[ResourceSpec] = []
         for resource in plan.resources:
-            if (
-                resource.lifetime == ResourceLifetime.MANAGED
-                and resource.driver == ResourceDriver.DOCKER_CONTAINER
-            ):
+            if resource.driver == ResourceDriver.DOCKER_CONTAINER:
                 managed_container_resources.append(resource)
+            elif resource.driver == ResourceDriver.FILE_SHARE:
+                logger.info(
+                    "File share '%s' at host path '%s' → container path '%s'",
+                    resource.id,
+                    resource.host_path,
+                    resource.container_path,
+                )
             else:
                 raise ConfigurationError(
                     f"Resource '{resource.id}': DockerExecutor does not support "
-                    f"driver='{resource.driver.value}' with lifetime='{resource.lifetime.value}'"
+                    f"driver='{resource.driver.value}'"
                 )
         if managed_container_resources and self._network is None:
             self._network = f"orch_resources_{uuid.uuid4().hex[:10]}"

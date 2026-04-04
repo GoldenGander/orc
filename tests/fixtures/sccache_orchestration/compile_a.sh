@@ -13,10 +13,10 @@ export SCCACHE_DIR=/tmp/sccache-local
 export SCCACHE_IDLE_TIMEOUT=0
 
 mkdir -p /tmp/build
-cp /src/hello.c /tmp/build/hello.c
+cp /src/file_a.c /tmp/build/
 
 sccache --start-server
 sccache --zero-stats
-sccache gcc -c /tmp/build/hello.c -o /tmp/build/hello.o
+sccache gcc -c /tmp/build/file_a.c -o /output/file_a.o
 sleep 2
-sccache --show-stats --stats-format=json > /output/sccache-stats.json
+sccache --show-stats --stats-format=json > /output/stats_a.json

@@ -24,7 +24,6 @@ from orchestrator.models import (
     JobResult,
     JobSpec,
     ResourceDriver,
-    ResourceLifetime,
     ResourceSpec,
     ResourceWeight,
     VolumeMount,
@@ -335,7 +334,6 @@ class TestPipelineLifecycle:
                 ResourceSpec(
                     id="redis",
                     kind="cache",
-                    lifetime=ResourceLifetime.MANAGED,
                     driver=ResourceDriver.DOCKER_CONTAINER,
                     image="redis:7-alpine",
                     aliases=["redis"],
@@ -368,7 +366,6 @@ class TestPipelineLifecycle:
         redis = ResourceSpec(
             id="redis",
             kind="cache",
-            lifetime=ResourceLifetime.MANAGED,
             driver=ResourceDriver.DOCKER_CONTAINER,
             image="redis:7-alpine",
             aliases=["redis"],
@@ -385,7 +382,6 @@ class TestPipelineLifecycle:
         queue = ResourceSpec(
             id="queue",
             kind="cache",
-            lifetime=ResourceLifetime.MANAGED,
             driver=ResourceDriver.DOCKER_CONTAINER,
             image="memcached:1.6",
             aliases=["cache-queue"],
@@ -435,7 +431,6 @@ class TestPipelineLifecycle:
         resource = ResourceSpec(
             id="redis",
             kind="cache",
-            lifetime=ResourceLifetime.MANAGED,
             driver=ResourceDriver.DOCKER_CONTAINER,
             image="redis:7-alpine",
             aliases=["redis"],
@@ -483,7 +478,6 @@ class TestPipelineLifecycle:
             ResourceSpec(
                 id="redis",
                 kind="cache",
-                lifetime=ResourceLifetime.MANAGED,
                 driver=ResourceDriver.DOCKER_CONTAINER,
                 image="redis:7-alpine",
                 aliases=["redis"],
@@ -491,7 +485,6 @@ class TestPipelineLifecycle:
             ResourceSpec(
                 id="queue",
                 kind="cache",
-                lifetime=ResourceLifetime.MANAGED,
                 driver=ResourceDriver.DOCKER_CONTAINER,
                 image="memcached:1.6",
                 aliases=["cache-queue"],
@@ -523,4 +516,74 @@ class TestPipelineLifecycle:
             assert len(call) == 3
             assert call[2].startswith("orch_resource_")
         assert ["docker", "network", "rm", "build-net"] in calls
+
+    def test_start_file_share_resource_issues_no_docker_commands(
+        self, executor: DockerExecutor
+    ) -> None:
+        plan = self._plan(
+            resources=[
+                ResourceSpec(
+                    id="boost",
+                    kind="library",
+                    driver=ResourceDriver.FILE_SHARE,
+                    host_path="/mnt/boost",
+                    container_path="/opt/boost",
+                    aliases=[],
+                )
+            ]
+        )
+        calls: list[list[str]] = []
+
+        with patch(
+            "orchestrator.executor.docker_executor.subprocess.run",
+            side_effect=lambda cmd, **kwargs: calls.append(cmd),
+        ):
+            executor.start(plan)
+
+        assert calls == [], "file_share resources must not trigger any docker commands"
+
+    def test_start_file_share_alongside_docker_container_resource(
+        self, executor: DockerExecutor
+    ) -> None:
+        """File share and docker_container resources coexist: only the container triggers docker commands."""
+        plan = self._plan(
+            resource_network="build-net",
+            resources=[
+                ResourceSpec(
+                    id="redis",
+                    kind="cache",
+                    driver=ResourceDriver.DOCKER_CONTAINER,
+                    image="redis:7-alpine",
+                    aliases=["redis"],
+                ),
+                ResourceSpec(
+                    id="boost",
+                    kind="library",
+                    driver=ResourceDriver.FILE_SHARE,
+                    host_path="/mnt/boost",
+                    container_path="/opt/boost",
+                    aliases=[],
+                ),
+            ],
+        )
+        calls: list[list[str]] = []
+
+        def _fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            if cmd[:3] == ["docker", "network", "inspect"]:
+                return subprocess.CompletedProcess(cmd, 0)
+            if cmd[:2] == ["docker", "inspect"]:
+                payload = [{"State": {"Status": "running"}}]
+                return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(payload))
+            return subprocess.CompletedProcess(cmd, 0)
+
+        with patch(
+            "orchestrator.executor.docker_executor.subprocess.run",
+            side_effect=_fake_run,
+        ), patch("orchestrator.executor.docker_executor.time.sleep", return_value=None):
+            executor.start(plan)
+
+        docker_run_calls = [cmd for cmd in calls if cmd[:3] == ["docker", "run", "-d"]]
+        assert len(docker_run_calls) == 1, "only the redis container should be started"
+        assert any("redis:7-alpine" in str(cmd) for cmd in docker_run_calls)
 

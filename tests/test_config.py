@@ -131,7 +131,6 @@ class TestValidConfig:
             resources:
               - id: redis
                 kind: cache
-                lifetime: managed
                 driver: docker_container
                 image: redis:7-alpine
                 aliases: [redis]
@@ -165,7 +164,6 @@ class TestValidConfig:
             resources:
               - id: redis
                 kind: cache
-                lifetime: managed
                 driver: docker_container
                 image: redis:7-alpine
                 artifacts:
@@ -402,7 +400,6 @@ class TestSchemaViolations:
             resources:
               - id: redis
                 kind: cache
-                lifetime: managed
                 driver: docker_container
             jobs:
               - id: a
@@ -419,7 +416,6 @@ class TestSchemaViolations:
             resources:
               - id: redis
                 kind: cache
-                lifetime: managed
                 driver: docker_container
                 image: redis:7-alpine
                 artifacts:
@@ -506,7 +502,6 @@ class TestValidationErrors:
             resources:
               - id: redis
                 kind: cache
-                lifetime: managed
                 driver: docker_container
                 image: redis:7-alpine
             jobs:
@@ -544,7 +539,6 @@ class TestValidationErrors:
             resources:
               - id: {resource_id!r}
                 kind: cache
-                lifetime: managed
                 driver: docker_container
                 image: redis:7-alpine
             jobs:
@@ -561,12 +555,10 @@ class TestValidationErrors:
             resources:
               - id: redis
                 kind: cache
-                lifetime: managed
                 driver: docker_container
                 image: redis:7-alpine
               - id: redis
                 kind: cache
-                lifetime: managed
                 driver: docker_container
                 image: memcached:1.6
             jobs:
@@ -591,7 +583,6 @@ class TestValidationErrors:
             resources:
               - id: redis
                 kind: cache
-                lifetime: managed
                 driver: docker_container
                 image: redis:7-alpine
                 artifacts:
@@ -602,4 +593,236 @@ class TestValidationErrors:
                 image: img:1
         """)
         with pytest.raises(ConfigurationError, match="destination_subdir must be a relative path"):
+            loader.load(path)
+
+
+# ---------------------------------------------------------------------------
+# file_share resource tests
+# ---------------------------------------------------------------------------
+
+
+class TestFileShareResource:
+    def test_file_share_is_parsed(self, loader: YamlConfigLoader, tmp_path: Path) -> None:
+        path = _write_yaml(tmp_path, """\
+            resources:
+              - id: boost
+                kind: library
+                driver: file_share
+                host_path: /mnt/shared/boost_1.85
+                container_path: /opt/boost
+            jobs:
+              - id: compile
+                image: gcc:14
+                resources: [boost]
+        """)
+        plan = loader.load(path)
+
+        assert len(plan.resources) == 1
+        share = plan.resources[0]
+        assert share.id == "boost"
+        assert share.kind == "library"
+        assert share.driver.value == "file_share"
+        assert share.host_path == "/mnt/shared/boost_1.85"
+        assert share.container_path == "/opt/boost"
+        assert share.image is None
+        assert share.command is None
+
+        assert plan.jobs[0].resources == ["boost"]
+
+    def test_file_share_without_job_reference_is_valid(
+        self, loader: YamlConfigLoader, tmp_path: Path
+    ) -> None:
+        path = _write_yaml(tmp_path, """\
+            resources:
+              - id: tools
+                driver: file_share
+                host_path: /mnt/tools
+                container_path: /opt/tools
+            jobs:
+              - id: a
+                image: img:1
+        """)
+        plan = loader.load(path)
+        assert len(plan.resources) == 1
+        assert plan.jobs[0].resources == []
+
+    def test_job_can_reference_multiple_file_shares(
+        self, loader: YamlConfigLoader, tmp_path: Path
+    ) -> None:
+        path = _write_yaml(tmp_path, """\
+            resources:
+              - id: boost
+                driver: file_share
+                host_path: /mnt/boost
+                container_path: /opt/boost
+              - id: tools
+                driver: file_share
+                host_path: /mnt/tools
+                container_path: /opt/tools
+            jobs:
+              - id: compile
+                image: gcc:14
+                resources: [boost, tools]
+        """)
+        plan = loader.load(path)
+        assert plan.jobs[0].resources == ["boost", "tools"]
+
+    def test_file_share_requires_host_path(
+        self, loader: YamlConfigLoader, tmp_path: Path
+    ) -> None:
+        path = _write_yaml(tmp_path, """\
+            resources:
+              - id: boost
+                driver: file_share
+                container_path: /opt/boost
+            jobs:
+              - id: a
+                image: img:1
+        """)
+        with pytest.raises(ConfigurationError, match="host_path must not be empty"):
+            loader.load(path)
+
+    def test_file_share_requires_container_path(
+        self, loader: YamlConfigLoader, tmp_path: Path
+    ) -> None:
+        path = _write_yaml(tmp_path, """\
+            resources:
+              - id: boost
+                driver: file_share
+                host_path: /mnt/boost
+            jobs:
+              - id: a
+                image: img:1
+        """)
+        with pytest.raises(ConfigurationError, match="container_path must not be empty"):
+            loader.load(path)
+
+    def test_file_share_container_path_must_be_absolute(
+        self, loader: YamlConfigLoader, tmp_path: Path
+    ) -> None:
+        path = _write_yaml(tmp_path, """\
+            resources:
+              - id: boost
+                driver: file_share
+                host_path: /mnt/boost
+                container_path: opt/boost
+            jobs:
+              - id: a
+                image: img:1
+        """)
+        with pytest.raises(ConfigurationError, match="container_path must be an absolute path"):
+            loader.load(path)
+
+    def test_file_share_forbids_image(
+        self, loader: YamlConfigLoader, tmp_path: Path
+    ) -> None:
+        path = _write_yaml(tmp_path, """\
+            resources:
+              - id: boost
+                driver: file_share
+                host_path: /mnt/boost
+                container_path: /opt/boost
+                image: someimage:latest
+            jobs:
+              - id: a
+                image: img:1
+        """)
+        with pytest.raises(ConfigurationError, match="image is not supported for file_share"):
+            loader.load(path)
+
+    def test_file_share_forbids_command(
+        self, loader: YamlConfigLoader, tmp_path: Path
+    ) -> None:
+        path = _write_yaml(tmp_path, """\
+            resources:
+              - id: boost
+                driver: file_share
+                host_path: /mnt/boost
+                container_path: /opt/boost
+                command: ["ls"]
+            jobs:
+              - id: a
+                image: img:1
+        """)
+        with pytest.raises(ConfigurationError, match="command is not supported for file_share"):
+            loader.load(path)
+
+    def test_file_share_forbids_aliases(
+        self, loader: YamlConfigLoader, tmp_path: Path
+    ) -> None:
+        path = _write_yaml(tmp_path, """\
+            resources:
+              - id: boost
+                driver: file_share
+                host_path: /mnt/boost
+                container_path: /opt/boost
+                aliases: [lib]
+            jobs:
+              - id: a
+                image: img:1
+        """)
+        with pytest.raises(ConfigurationError, match="aliases are not supported for file_share"):
+            loader.load(path)
+
+    def test_job_resources_must_reference_known_resource(
+        self, loader: YamlConfigLoader, tmp_path: Path
+    ) -> None:
+        path = _write_yaml(tmp_path, """\
+            jobs:
+              - id: compile
+                image: gcc:14
+                resources: [nonexistent]
+        """)
+        with pytest.raises(ConfigurationError, match="unknown resource 'nonexistent'"):
+            loader.load(path)
+
+    def test_job_resources_cannot_reference_docker_container_resource(
+        self, loader: YamlConfigLoader, tmp_path: Path
+    ) -> None:
+        path = _write_yaml(tmp_path, """\
+            resource_network: ci-net
+            resources:
+              - id: redis
+                driver: docker_container
+                image: redis:7-alpine
+            jobs:
+              - id: compile
+                image: gcc:14
+                resources: [redis]
+        """)
+        with pytest.raises(ConfigurationError, match="can only reference file_share resources"):
+            loader.load(path)
+
+    def test_job_resources_duplicate_reference_rejected(
+        self, loader: YamlConfigLoader, tmp_path: Path
+    ) -> None:
+        path = _write_yaml(tmp_path, """\
+            resources:
+              - id: boost
+                driver: file_share
+                host_path: /mnt/boost
+                container_path: /opt/boost
+            jobs:
+              - id: compile
+                image: gcc:14
+                resources: [boost, boost]
+        """)
+        with pytest.raises(ConfigurationError, match="duplicate resource reference 'boost'"):
+            loader.load(path)
+
+    def test_docker_container_resource_forbids_host_path(
+        self, loader: YamlConfigLoader, tmp_path: Path
+    ) -> None:
+        path = _write_yaml(tmp_path, """\
+            resource_network: ci-net
+            resources:
+              - id: redis
+                driver: docker_container
+                image: redis:7-alpine
+                host_path: /mnt/data
+            jobs:
+              - id: a
+                image: img:1
+        """)
+        with pytest.raises(ConfigurationError, match="host_path is not supported for docker_container"):
             loader.load(path)

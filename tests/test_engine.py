@@ -21,7 +21,6 @@ from orchestrator.models import (
     JobSpec,
     OrchestratorResult,
     ResourceDriver,
-    ResourceLifetime,
     ResourceSpec,
     ResourceWeight,
 )
@@ -224,7 +223,6 @@ def _resource(resource_id: str, artifacts: list[ArtifactSpec] | None = None) -> 
     return ResourceSpec(
         id=resource_id,
         kind="cache",
-        lifetime=ResourceLifetime.MANAGED,
         driver=ResourceDriver.DOCKER_CONTAINER,
         image=f"registry/{resource_id}:latest",
         artifacts=artifacts or [ArtifactSpec(source_glob="*.txt", destination_subdir="resources")],
@@ -369,7 +367,6 @@ class TestArtifactCollection:
                 ResourceSpec(
                     id="redis",
                     kind="cache",
-                    lifetime=ResourceLifetime.MANAGED,
                     driver=ResourceDriver.DOCKER_CONTAINER,
                     image="redis:7-alpine",
                 )

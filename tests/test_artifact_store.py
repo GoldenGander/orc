@@ -11,7 +11,6 @@ from orchestrator.models import (
     JobResult,
     JobSpec,
     ResourceDriver,
-    ResourceLifetime,
     ResourceSpec,
     ResourceWeight,
 )
@@ -51,7 +50,6 @@ def _make_resource(
     return ResourceSpec(
         id=resource_id,
         kind="cache",
-        lifetime=ResourceLifetime.MANAGED,
         driver=ResourceDriver.DOCKER_CONTAINER,
         image="redis:7-alpine",
         artifacts=artifacts or [ArtifactSpec(source_glob="*.txt", destination_subdir="resources")],

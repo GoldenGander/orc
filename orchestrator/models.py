@@ -18,12 +18,9 @@ class JobStatus(Enum):
     SKIPPED = "skipped"
 
 
-class ResourceLifetime(Enum):
-    MANAGED = "managed"
-
-
 class ResourceDriver(Enum):
     DOCKER_CONTAINER = "docker_container"
+    FILE_SHARE = "file_share"
 
 
 @dataclass(frozen=True)
@@ -65,15 +62,23 @@ class ArtifactSpec:
 class ResourceSpec:
     """Pipeline-wide shared resource configuration.
 
-    Resources are shared infrastructure started and managed by the orchestrator
-    for the lifetime of the plan.
+    Two drivers are supported:
+
+    ``docker_container`` — a managed container started before jobs run and torn
+    down afterwards.  Requires ``image``; supports ``aliases``, ``command``,
+    ``volumes``, ``env_vars``, and ``artifacts``.
+
+    ``file_share`` — a host directory bind-mounted read-only into every job that
+    declares it in ``resources``.  Requires ``host_path`` and
+    ``container_path``; all other Docker-specific fields must be absent.
     """
 
     id: str
     kind: str = "generic"
-    lifetime: ResourceLifetime = ResourceLifetime.MANAGED
     driver: ResourceDriver = ResourceDriver.DOCKER_CONTAINER
     image: str | None = None
+    host_path: str | None = None
+    container_path: str | None = None
     aliases: list[str] = field(default_factory=list)
     command: list[str] | None = None
     artifacts: list[ArtifactSpec] = field(default_factory=list)
@@ -94,6 +99,7 @@ class JobSpec:
     timeout_seconds: int | None = None
     volumes: list[VolumeMount] = field(default_factory=list)
     env_vars: dict[str, str] = field(default_factory=dict)
+    resources: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
