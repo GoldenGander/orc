@@ -83,8 +83,10 @@ def main() -> None:
             output_root=args.output_dir,
         )
 
-        result = engine.run(plan)
-        executor.shutdown()
+        try:
+            result = engine.run(plan)
+        finally:
+            executor.shutdown()
 
     if not result.success:
         failed = [r.job_id for r in result.job_results if not r.success]
