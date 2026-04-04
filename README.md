@@ -57,11 +57,14 @@ failure_policy: fail_fast          # "fail_fast" stops on first failure; "contin
 max_parallel: 4                    # Max jobs running simultaneously
 total_cpu_slots: 8                 # Total CPU slots available (distributed by job)
 total_memory_slots: 8              # Total memory slots available (distributed by job)
-network: build-cache-net           # Optional shared container network for jobs/services
-services:                          # Optional pipeline-wide service containers
+resource_network: build-cache-net  # Optional shared network for managed container resources
+resources:                         # Optional pipeline-wide shared resources
   - id: redis
+    kind: cache
+    lifetime: managed
+    driver: docker_container
     image: redis:7-alpine
-    aliases: [redis]               # Hostnames visible to jobs on network
+    aliases: [redis]               # Hostnames visible to jobs on resource_network
     command: ["redis-server", "--appendonly", "yes"]
     env_vars:
       REDIS_PASSWORD: "secret"
@@ -96,24 +99,31 @@ The orchestrator automatically injects two system-managed volumes into every job
 
 Jobs can additionally declare user-managed volumes in the `volumes` array.
 
-If `services` are configured, each service container gets its own configured
-volumes. Service volumes are never mounted into build jobs.
+If managed container `resources` are configured, each resource container gets
+its own configured volumes. Resource volumes are never mounted into build jobs.
 
-### Services + Network
+### Resources + Network
 
-`services` are pipeline-wide service containers. They start before job dispatch,
-join `network`, and are stopped after orchestration completes.
+Managed `resources` are pipeline-wide shared dependencies. For the
+`docker_container` driver, they start before job dispatch, join
+`resource_network` (or an auto-created network), and are stopped after
+orchestration completes.
 
-- Jobs only connect over `network`.
-- Use `aliases` (or service `id` by default) as DNS hostnames from jobs.
-- Use service `volumes` to persist data on the host machine.
+- Jobs connect to managed container resources over `resource_network`.
+- Use `aliases` (or resource `id` by default) as DNS hostnames from jobs.
+- Use resource `volumes` to persist data on the host machine.
+- Use `driver: external` plus `endpoint` for shared infrastructure the
+  orchestrator references but does not manage.
 
 Example Redis usage from a job command:
 
 ```yaml
-network: build-cache-net
-services:
+resource_network: build-cache-net
+resources:
   - id: redis
+    kind: cache
+    lifetime: managed
+    driver: docker_container
     image: redis:7-alpine
     aliases: [redis]
     command: ["redis-server", "--appendonly", "yes"]
@@ -265,7 +275,7 @@ jobs:
       - checkout: self
       - task: UsePythonVersion@0
         inputs:
-          versionSpec: '3.11'
+          versionSpec: '3.12'
       - script: |
           pip install uv
           uv run python main.py build-config.yaml --source-dir $(Build.SourcesDirectory) --output-dir $(Build.ArtifactStagingDirectory)
@@ -274,4 +284,4 @@ jobs:
 
 ## License
 
-See LICENSE file for details.
+This repository does not currently include a license file.
