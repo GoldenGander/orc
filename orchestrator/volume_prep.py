@@ -18,6 +18,7 @@ from orchestrator.path_safety import require_safe_path_component
 
 CONTAINER_SOURCE_PATH = "/src"
 CONTAINER_OUTPUT_PATH = "/output"
+CONTAINER_INPUT_PREFIX = "/input"
 RESOURCE_OUTPUT_DIRNAME = "resources"
 
 
@@ -76,6 +77,20 @@ def prepare_volumes(
                 VolumeMount(
                     host_path=share.host_path,
                     container_path=share.container_path,
+                    read_only=True,
+                )
+            )
+
+        for source_job_id in job.input_from:
+            safe_source_id = require_safe_path_component(
+                source_job_id, owner_label="Job", field_name="input_from"
+            )
+            source_output_dir = container_output_root / safe_source_id
+            source_output_dir.mkdir(parents=True, exist_ok=True)
+            job.volumes.append(
+                VolumeMount(
+                    host_path=str(source_output_dir),
+                    container_path=f"{CONTAINER_INPUT_PREFIX}/{safe_source_id}",
                     read_only=True,
                 )
             )

@@ -97,6 +97,7 @@ class JobSpec:
     artifacts: list[ArtifactSpec]
     command: list[str] | None = None
     timeout_seconds: int | None = None
+    input_from: frozenset[str] = field(default_factory=frozenset)
     volumes: list[VolumeMount] = field(default_factory=list)
     env_vars: dict[str, str] = field(default_factory=dict)
     resources: list[str] = field(default_factory=list)

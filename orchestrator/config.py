@@ -52,6 +52,7 @@ class RawJobConfig:
     artifacts: list[RawArtifactConfig] = field(default_factory=list)
     volumes: list[RawVolumeConfig] = field(default_factory=list)
     env_vars: dict[str, str] = field(default_factory=dict)
+    input_from: list[str] = field(default_factory=list)
     resources: list[str] = field(default_factory=list)
 
 
@@ -229,6 +230,23 @@ class YamlConfigLoader(IConfigLoader):
                 )
 
         for job in raw.jobs:
+            seen_input_from: set[str] = set()
+            for source_id in job.input_from:
+                if source_id not in all_ids:
+                    raise ConfigurationError(
+                        f"Job '{job.id}': input_from references unknown job '{source_id}'"
+                    )
+                if source_id not in set(job.depends_on):
+                    raise ConfigurationError(
+                        f"Job '{job.id}': input_from '{source_id}' must also be listed in depends_on"
+                    )
+                if source_id in seen_input_from:
+                    raise ConfigurationError(
+                        f"Job '{job.id}': duplicate input_from reference '{source_id}'"
+                    )
+                seen_input_from.add(source_id)
+
+        for job in raw.jobs:
             if job.cpu_slots < 1:
                 raise ConfigurationError(f"Job '{job.id}': cpu_slots must be >= 1")
             if job.memory_slots < 1:
@@ -366,6 +384,7 @@ class YamlConfigLoader(IConfigLoader):
                 ],
                 command=rj.command,
                 timeout_seconds=rj.timeout_seconds,
+                input_from=frozenset(rj.input_from),
                 volumes=[
                     VolumeMount(
                         host_path=v.host_path,
@@ -453,6 +472,10 @@ def _parse_job(entry: dict[str, Any], index: int) -> RawJobConfig:
         raise ConfigurationError(f"{prefix}.env_vars: expected a mapping")
     env_vars = {str(k): str(v) for k, v in env_vars.items()}
 
+    input_from = entry.get("input_from", [])
+    if not isinstance(input_from, list) or not all(isinstance(d, str) for d in input_from):
+        raise ConfigurationError(f"{prefix}.input_from: expected a list of strings")
+
     resources = entry.get("resources", [])
     if not isinstance(resources, list) or not all(isinstance(r, str) for r in resources):
         raise ConfigurationError(f"{prefix}.resources: expected a list of strings")
@@ -468,6 +491,7 @@ def _parse_job(entry: dict[str, Any], index: int) -> RawJobConfig:
         artifacts=_parse_artifacts(entry.get("artifacts", []), prefix=f"{prefix}.artifacts"),
         volumes=volumes,
         env_vars=env_vars,
+        input_from=input_from,
         resources=resources,
     )
 

@@ -17,6 +17,7 @@ from orchestrator.models import (
     VolumeMount,
 )
 from orchestrator.volume_prep import (
+    CONTAINER_INPUT_PREFIX,
     CONTAINER_OUTPUT_PATH,
     CONTAINER_SOURCE_PATH,
     RESOURCE_OUTPUT_DIRNAME,
@@ -24,13 +25,19 @@ from orchestrator.volume_prep import (
 )
 
 
-def _job(jid: str, volumes: list[VolumeMount] | None = None) -> JobSpec:
+def _job(
+    jid: str,
+    volumes: list[VolumeMount] | None = None,
+    input_from: frozenset[str] | None = None,
+    depends_on: frozenset[str] | None = None,
+) -> JobSpec:
     return JobSpec(
         id=jid,
         image=f"registry/{jid}:latest",
-        depends_on=frozenset(),
+        depends_on=depends_on or frozenset(),
         resource_weight=ResourceWeight(),
         artifacts=[ArtifactSpec(source_glob="*.bin", destination_subdir=jid)],
+        input_from=input_from or frozenset(),
         volumes=list(volumes or []),
     )
 
@@ -271,3 +278,104 @@ class TestPrepareVolumes:
         assert "/opt/tools" in mounted
         assert mounted["/opt/tools"].host_path == "/mnt/tools"
         assert mounted["/opt/tools"].read_only is True
+
+
+class TestInputFromVolumes:
+    def test_input_from_mount_is_read_only_at_input_prefix(self, tmp_path: Path) -> None:
+        source = tmp_path / "src"
+        source.mkdir()
+        compile_job = _job("compile")
+        opt_job = _job("opt", input_from=frozenset({"compile"}), depends_on=frozenset({"compile"}))
+        plan = _plan([compile_job, opt_job])
+
+        prepare_volumes(plan, source, tmp_path / "out")
+
+        input_vols = [v for v in opt_job.volumes if v.container_path.startswith(CONTAINER_INPUT_PREFIX)]
+        assert len(input_vols) == 1
+        assert input_vols[0].container_path == f"{CONTAINER_INPUT_PREFIX}/compile"
+        assert input_vols[0].host_path == str(tmp_path / "out" / "compile")
+        assert input_vols[0].read_only is True
+
+    def test_input_from_host_path_matches_source_job_output_dir(self, tmp_path: Path) -> None:
+        source = tmp_path / "src"
+        source.mkdir()
+        out_root = tmp_path / "out"
+        compile_job = _job("compile")
+        opt_job = _job("opt", input_from=frozenset({"compile"}), depends_on=frozenset({"compile"}))
+        plan = _plan([compile_job, opt_job])
+
+        prepare_volumes(plan, source, out_root)
+
+        compile_output_vol = next(
+            v for v in compile_job.volumes if v.container_path == CONTAINER_OUTPUT_PATH
+        )
+        input_vol = next(
+            v for v in opt_job.volumes if v.container_path == f"{CONTAINER_INPUT_PREFIX}/compile"
+        )
+        assert input_vol.host_path == compile_output_vol.host_path
+
+    def test_input_from_dir_created_even_when_source_listed_after_consumer(
+        self, tmp_path: Path
+    ) -> None:
+        source = tmp_path / "src"
+        source.mkdir()
+        out_root = tmp_path / "out"
+        # opt listed before compile in jobs list — source dir must still be pre-created
+        opt_job = _job("opt", input_from=frozenset({"compile"}), depends_on=frozenset({"compile"}))
+        compile_job = _job("compile")
+        plan = _plan([opt_job, compile_job])
+
+        prepare_volumes(plan, source, out_root)
+
+        assert (out_root / "compile").is_dir()
+
+    def test_multiple_input_from_mount_to_separate_paths(self, tmp_path: Path) -> None:
+        source = tmp_path / "src"
+        source.mkdir()
+        job_a = _job("job-a")
+        job_b = _job("job-b")
+        consumer = _job(
+            "consumer",
+            input_from=frozenset({"job-a", "job-b"}),
+            depends_on=frozenset({"job-a", "job-b"}),
+        )
+        plan = _plan([job_a, job_b, consumer])
+
+        prepare_volumes(plan, source, tmp_path / "out")
+
+        input_vols = {
+            v.container_path: v
+            for v in consumer.volumes
+            if v.container_path.startswith(CONTAINER_INPUT_PREFIX)
+        }
+        assert f"{CONTAINER_INPUT_PREFIX}/job-a" in input_vols
+        assert f"{CONTAINER_INPUT_PREFIX}/job-b" in input_vols
+        assert input_vols[f"{CONTAINER_INPUT_PREFIX}/job-a"].read_only is True
+        assert input_vols[f"{CONTAINER_INPUT_PREFIX}/job-b"].read_only is True
+
+    def test_job_without_input_from_gets_no_input_mounts(self, tmp_path: Path) -> None:
+        source = tmp_path / "src"
+        source.mkdir()
+        job = _job("standalone")
+        plan = _plan([job])
+
+        prepare_volumes(plan, source, tmp_path / "out")
+
+        input_vols = [v for v in job.volumes if v.container_path.startswith(CONTAINER_INPUT_PREFIX)]
+        assert input_vols == []
+
+    def test_input_from_does_not_affect_source_jobs_volumes(self, tmp_path: Path) -> None:
+        source = tmp_path / "src"
+        source.mkdir()
+        compile_job = _job("compile")
+        opt_job = _job("opt", input_from=frozenset({"compile"}), depends_on=frozenset({"compile"}))
+        plan = _plan([compile_job, opt_job])
+
+        prepare_volumes(plan, source, tmp_path / "out")
+
+        # compile only gets source + output, no input mounts
+        input_vols = [
+            v for v in compile_job.volumes if v.container_path.startswith(CONTAINER_INPUT_PREFIX)
+        ]
+        assert input_vols == []
+        assert len(compile_job.volumes) == 2  # source + output

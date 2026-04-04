@@ -826,3 +826,104 @@ class TestFileShareResource:
         """)
         with pytest.raises(ConfigurationError, match="host_path is not supported for docker_container"):
             loader.load(path)
+
+
+# ---------------------------------------------------------------------------
+# input_from tests
+# ---------------------------------------------------------------------------
+
+
+class TestInputFrom:
+    def test_input_from_is_parsed(self, loader: YamlConfigLoader, tmp_path: Path) -> None:
+        path = _write_yaml(tmp_path, """\
+            jobs:
+              - id: compile
+                image: img:1
+              - id: opt
+                image: img:2
+                depends_on: [compile]
+                input_from: [compile]
+        """)
+        plan = loader.load(path)
+
+        opt = plan.jobs[1]
+        assert opt.input_from == frozenset({"compile"})
+
+    def test_input_from_defaults_to_empty(self, loader: YamlConfigLoader, tmp_path: Path) -> None:
+        path = _write_yaml(tmp_path, """\
+            jobs:
+              - id: a
+                image: img:1
+        """)
+        plan = loader.load(path)
+        assert plan.jobs[0].input_from == frozenset()
+
+    def test_input_from_multiple_sources(self, loader: YamlConfigLoader, tmp_path: Path) -> None:
+        path = _write_yaml(tmp_path, """\
+            jobs:
+              - id: job_a
+                image: img:1
+              - id: job_b
+                image: img:1
+              - id: job_c
+                image: img:2
+                depends_on: [job_a, job_b]
+                input_from: [job_a, job_b]
+        """)
+        plan = loader.load(path)
+        assert plan.jobs[2].input_from == frozenset({"job_a", "job_b"})
+
+    def test_input_from_unknown_job_rejected(self, loader: YamlConfigLoader, tmp_path: Path) -> None:
+        path = _write_yaml(tmp_path, """\
+            jobs:
+              - id: opt
+                image: img:1
+                depends_on: []
+                input_from: [nonexistent]
+        """)
+        with pytest.raises(ConfigurationError, match="input_from references unknown job 'nonexistent'"):
+            loader.load(path)
+
+    def test_input_from_without_depends_on_rejected(
+        self, loader: YamlConfigLoader, tmp_path: Path
+    ) -> None:
+        path = _write_yaml(tmp_path, """\
+            jobs:
+              - id: compile
+                image: img:1
+              - id: opt
+                image: img:2
+                input_from: [compile]
+        """)
+        with pytest.raises(ConfigurationError, match="must also be listed in depends_on"):
+            loader.load(path)
+
+    def test_input_from_duplicate_reference_rejected(
+        self, loader: YamlConfigLoader, tmp_path: Path
+    ) -> None:
+        path = _write_yaml(tmp_path, """\
+            jobs:
+              - id: compile
+                image: img:1
+              - id: opt
+                image: img:2
+                depends_on: [compile]
+                input_from: [compile, compile]
+        """)
+        with pytest.raises(ConfigurationError, match="duplicate input_from reference 'compile'"):
+            loader.load(path)
+
+    def test_input_from_not_a_list_rejected(
+        self, loader: YamlConfigLoader, tmp_path: Path
+    ) -> None:
+        path = _write_yaml(tmp_path, """\
+            jobs:
+              - id: compile
+                image: img:1
+              - id: opt
+                image: img:2
+                depends_on: [compile]
+                input_from: compile
+        """)
+        with pytest.raises(ConfigurationError, match="input_from.*list of strings"):
+            loader.load(path)
