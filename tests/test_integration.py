@@ -8,8 +8,12 @@ Requires Docker to be available on the host. Tests are marked with
 """
 from __future__ import annotations
 
+import json
+import shutil
+import subprocess
 from pathlib import Path
 from typing import override
+from uuid import uuid4
 
 import pytest
 
@@ -58,7 +62,6 @@ class RecordingReporter(IPipelineReporter):
 
 def _docker_available() -> bool:
     """Return True if the Docker daemon is reachable."""
-    import subprocess
     try:
         result = subprocess.run(
             ["docker", "info"],
@@ -76,6 +79,73 @@ requires_docker = pytest.mark.skipif(
 )
 
 integration = pytest.mark.integration
+
+
+def _build_test_image(context_dir: Path, tag: str) -> None:
+    subprocess.run(
+        ["docker", "build", "-t", tag, str(context_dir)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _remove_test_image(tag: str) -> None:
+    subprocess.run(
+        ["docker", "rmi", "-f", tag],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _render_fixture_template(template_path: Path, destination: Path, **values: str) -> Path:
+    destination.write_text(template_path.read_text(encoding="utf-8").format(**values), encoding="utf-8")
+    return destination
+
+
+def _run_plan(
+    plan_path: Path,
+    tmp_path: Path,
+    *,
+    source_fixture_dir: Path | None = None,
+) -> tuple[OrchestratorResult, RecordingReporter, Path]:
+    loader = YamlConfigLoader()
+    plan = loader.load(plan_path)
+
+    log_dir = tmp_path / "logs"
+    output_dir = tmp_path / "output"
+    source_dir = tmp_path / "source"
+    container_output_root = tmp_path / "container_outputs"
+    staging_dir = tmp_path / "staging"
+    source_dir.mkdir()
+    if source_fixture_dir is not None:
+        for path in source_fixture_dir.iterdir():
+            if path.is_file():
+                shutil.copy2(path, source_dir / path.name)
+
+    prepare_volumes(plan, source_dir, container_output_root)
+
+    job_logger = FileJobLogger(log_dir)
+    artifact_store = ArtifactStore(staging_dir, container_output_root)
+    reporter = RecordingReporter()
+    scheduler = ResourceScheduler(plan)
+    executor = DockerExecutor(logger=job_logger, max_workers=plan.max_parallel)
+
+    try:
+        engine = Engine(
+            scheduler=scheduler,
+            executor=executor,
+            artifact_store=artifact_store,
+            job_logger=job_logger,
+            reporter=reporter,
+            output_root=output_dir,
+        )
+        result = engine.run(plan)
+    finally:
+        executor.shutdown()
+
+    return result, reporter, output_dir
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +350,76 @@ jobs:
         assert copied.read_text().strip() == "1.2.3"
 
         executor.shutdown()
+
+    def test_sccache_redis_backend_restores_from_snapshot(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The same plan uses a stable Redis host volume so the second run hits the cache on the same host."""
+        image_tag = f"build-orch-sccache-test:{uuid4().hex[:12]}"
+        _build_test_image(FIXTURES_DIR / "sccache_consumer", image_tag)
+
+        try:
+            fixture_dir = FIXTURES_DIR / "sccache_redis"
+            redis_host_path = (tmp_path / "redis-cache").resolve()
+            redis_host_path.mkdir()
+
+            seed_tmp = tmp_path / "seed"
+            seed_tmp.mkdir()
+            seed_plan = seed_tmp / "plan.yaml"
+            _render_fixture_template(
+                fixture_dir / "plan.yaml.tmpl",
+                seed_plan,
+                network=f"redis-seed-{uuid4().hex[:10]}",
+                image_tag=image_tag,
+                redis_host_path=redis_host_path.as_posix(),
+            )
+
+            seed_result, seed_reporter, seed_output = _run_plan(
+                seed_plan,
+                seed_tmp,
+                source_fixture_dir=fixture_dir,
+            )
+            assert seed_result.success is True
+            assert seed_reporter.final_result is not None
+            assert seed_reporter.final_result.success is True
+
+            restored_tmp = tmp_path / "restored"
+            restored_tmp.mkdir()
+            restore_plan = restored_tmp / "plan.yaml"
+            _render_fixture_template(
+                fixture_dir / "plan.yaml.tmpl",
+                restore_plan,
+                network=f"redis-restore-{uuid4().hex[:10]}",
+                image_tag=image_tag,
+                redis_host_path=redis_host_path.as_posix(),
+            )
+
+            restore_result, restore_reporter, restore_output = _run_plan(
+                restore_plan,
+                restored_tmp,
+                source_fixture_dir=fixture_dir,
+            )
+
+            assert restore_result.success is True
+            assert restore_reporter.final_result is not None
+            assert restore_reporter.final_result.success is True
+
+            seed_stats = json.loads((seed_output / "combined" / "sccache-stats.json").read_text())["stats"]
+            restore_stats = json.loads((restore_output / "combined" / "sccache-stats.json").read_text())["stats"]
+
+            dump_file = redis_host_path / "dump.rdb"
+            assert dump_file.exists()
+            assert dump_file.stat().st_size > 0
+            assert seed_stats["compile_requests"] >= 1
+            assert seed_stats["cache_writes"] >= 1
+            assert seed_stats["cache_misses"]["counts"]["C/C++"] >= 1
+            assert seed_stats["cache_hits"]["counts"].get("C/C++", 0) == 0
+            assert restore_stats["compile_requests"] >= 1
+            assert restore_stats["cache_hits"]["counts"]["C/C++"] >= 1
+            assert restore_stats["cache_misses"]["counts"].get("C/C++", 0) == 0
+        finally:
+            _remove_test_image(image_tag)
 
     def test_failing_job_propagates(self, tmp_path: Path) -> None:
         """A container that exits non-zero causes the orchestration to fail."""

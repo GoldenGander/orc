@@ -3,17 +3,24 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from orchestrator.exceptions import ConfigurationError
 from orchestrator.models import (
     ArtifactSpec,
     BuildPlan,
     FailurePolicy,
     JobSpec,
+    ResourceDriver,
+    ResourceLifetime,
+    ResourceSpec,
     ResourceWeight,
     VolumeMount,
 )
 from orchestrator.volume_prep import (
     CONTAINER_OUTPUT_PATH,
     CONTAINER_SOURCE_PATH,
+    RESOURCE_OUTPUT_DIRNAME,
     prepare_volumes,
 )
 
@@ -29,13 +36,36 @@ def _job(jid: str, volumes: list[VolumeMount] | None = None) -> JobSpec:
     )
 
 
-def _plan(jobs: list[JobSpec]) -> BuildPlan:
+def _resource(
+    resource_id: str,
+    volumes: list[VolumeMount] | None = None,
+    *,
+    lifetime: ResourceLifetime = ResourceLifetime.MANAGED,
+) -> ResourceSpec:
+    return ResourceSpec(
+        id=resource_id,
+        kind="cache",
+        lifetime=lifetime,
+        driver=(
+            ResourceDriver.DOCKER_CONTAINER
+            if lifetime == ResourceLifetime.MANAGED
+            else ResourceDriver.EXTERNAL
+        ),
+        image=(f"registry/{resource_id}:latest" if lifetime == ResourceLifetime.MANAGED else None),
+        endpoint=("redis://cache.internal:6379" if lifetime == ResourceLifetime.EXTERNAL else None),
+        artifacts=[ArtifactSpec(source_glob="*.txt", destination_subdir=resource_id)],
+        volumes=list(volumes or []),
+    )
+
+
+def _plan(jobs: list[JobSpec], resources: list[ResourceSpec] | None = None) -> BuildPlan:
     return BuildPlan(
         jobs=jobs,
         failure_policy=FailurePolicy.FAIL_FAST,
         max_parallel=4,
         total_cpu_slots=8,
         total_memory_slots=8,
+        resources=resources or [],
     )
 
 
@@ -118,3 +148,54 @@ class TestPrepareVolumes:
         prepare_volumes(plan, source, tmp_path / "out")
 
         assert plan.jobs == []
+
+    def test_appends_output_mount_to_managed_resources(self, tmp_path: Path) -> None:
+        source = tmp_path / "src"
+        source.mkdir()
+        plan = _plan([], resources=[_resource("redis")])
+
+        prepare_volumes(plan, source, tmp_path / "out")
+
+        output_vols = [v for v in plan.resources[0].volumes if v.container_path == CONTAINER_OUTPUT_PATH]
+        assert len(output_vols) == 1
+        assert output_vols[0].host_path == str(tmp_path / "out" / RESOURCE_OUTPUT_DIRNAME / "redis")
+        assert output_vols[0].read_only is False
+
+    def test_creates_per_resource_output_directories(self, tmp_path: Path) -> None:
+        source = tmp_path / "src"
+        source.mkdir()
+        out_root = tmp_path / "out"
+        plan = _plan([], resources=[_resource("redis"), _resource("queue")])
+
+        prepare_volumes(plan, source, out_root)
+
+        assert (out_root / RESOURCE_OUTPUT_DIRNAME / "redis").is_dir()
+        assert (out_root / RESOURCE_OUTPUT_DIRNAME / "queue").is_dir()
+
+    def test_external_resources_do_not_get_managed_output_mounts(self, tmp_path: Path) -> None:
+        source = tmp_path / "src"
+        source.mkdir()
+        plan = _plan([], resources=[_resource("redis", lifetime=ResourceLifetime.EXTERNAL)])
+
+        prepare_volumes(plan, source, tmp_path / "out")
+
+        output_vols = [v for v in plan.resources[0].volumes if v.container_path == CONTAINER_OUTPUT_PATH]
+        assert output_vols == []
+
+    @pytest.mark.parametrize("job_id", ["../escape", "a/b", "job name", "con"])
+    def test_rejects_unsafe_job_ids(self, tmp_path: Path, job_id: str) -> None:
+        source = tmp_path / "src"
+        source.mkdir()
+        plan = _plan([_job(job_id)])
+
+        with pytest.raises(ConfigurationError, match="single path component|Windows reserved name"):
+            prepare_volumes(plan, source, tmp_path / "out")
+
+    @pytest.mark.parametrize("resource_id", ["../escape", "a/b", "resource name", "aux"])
+    def test_rejects_unsafe_resource_ids(self, tmp_path: Path, resource_id: str) -> None:
+        source = tmp_path / "src"
+        source.mkdir()
+        plan = _plan([], resources=[_resource(resource_id)])
+
+        with pytest.raises(ConfigurationError, match="single path component|Windows reserved name"):
+            prepare_volumes(plan, source, tmp_path / "out")

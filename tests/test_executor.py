@@ -6,6 +6,7 @@ so tests run without a Docker daemon.
 """
 from __future__ import annotations
 
+import json
 import subprocess
 from concurrent.futures import Future
 from pathlib import Path
@@ -22,8 +23,10 @@ from orchestrator.models import (
     FailurePolicy,
     JobResult,
     JobSpec,
+    ResourceDriver,
+    ResourceLifetime,
+    ResourceSpec,
     ResourceWeight,
-    ServiceSpec,
     VolumeMount,
 )
 
@@ -189,6 +192,48 @@ class TestExecutorError:
         assert "docker not found" in log_text
 
 
+class TestJobTimeouts:
+    """The executor must bound hung jobs and stop their containers."""
+
+    @patch("orchestrator.executor.docker_executor.uuid.uuid4")
+    @patch("orchestrator.executor.docker_executor.subprocess.run")
+    def test_timeout_returns_failed_result_and_stops_container(
+        self,
+        mock_run,
+        mock_uuid,
+        executor: ExecutorABC,
+        job_logger: FileJobLogger,
+    ) -> None:
+        mock_uuid.return_value = type("U", (), {"hex": "deadbeefcafebabe"})()
+
+        def _side_effect(cmd, **kwargs):
+            if cmd[:2] == ["docker", "stop"]:
+                return subprocess.CompletedProcess(cmd, 0)
+            raise subprocess.TimeoutExpired(cmd, timeout=kwargs.get("timeout"))
+
+        mock_run.side_effect = _side_effect
+
+        timed_job = JobSpec(
+            id="job_timeout",
+            image="registry/timed:latest",
+            depends_on=frozenset(),
+            resource_weight=ResourceWeight(),
+            artifacts=[],
+            timeout_seconds=5,
+        )
+
+        result = executor.submit(timed_job).result(timeout=5)
+
+        assert result.success is False
+        assert result.exit_code == -124
+        assert result.log_path.exists()
+        assert "timed out after 5 seconds" in result.log_path.read_text()
+        assert mock_run.call_args_list[0].args[0][:3] == ["docker", "run", "--rm"]
+        assert mock_run.call_args_list[0].kwargs["timeout"] == 5
+        assert mock_run.call_args_list[1].args[0][:2] == ["docker", "stop"]
+        assert mock_run.call_args_list[1].args[0][2] == "orch_job_deadbeefcafe"
+
+
 class TestNoCommand:
     """When command is None, the executor must omit extra args so Docker
     uses the image's default entrypoint."""
@@ -252,8 +297,8 @@ class TestPipelineLifecycle:
     def _plan(
         self,
         *,
-        network: str | None = None,
-        services: list[ServiceSpec] | None = None,
+        resource_network: str | None = None,
+        resources: list[ResourceSpec] | None = None,
     ) -> BuildPlan:
         return BuildPlan(
             jobs=[],
@@ -261,8 +306,8 @@ class TestPipelineLifecycle:
             max_parallel=2,
             total_cpu_slots=2,
             total_memory_slots=2,
-            network=network,
-            services=services or [],
+            resource_network=resource_network,
+            resources=resources or [],
         )
 
     def test_start_adds_network_to_job_runs(
@@ -272,33 +317,59 @@ class TestPipelineLifecycle:
             "orchestrator.executor.docker_executor.subprocess.run",
             return_value=subprocess.CompletedProcess(["docker"], 0),
         ):
-            executor.start(self._plan(network="build-net"))
+            executor.start(self._plan(resource_network="build-net"))
 
-        cmd = executor._build_docker_command(job_no_command)
+        cmd = executor._build_docker_command(job_no_command, "orch_job_test")
         assert "--network" in cmd
         net_index = cmd.index("--network")
         assert cmd[net_index + 1] == "build-net"
+        assert "--name" in cmd
+        name_index = cmd.index("--name")
+        assert cmd[name_index + 1] == "orch_job_test"
 
-    def test_start_services_without_network_raises(
+    def test_start_managed_resources_without_network_autocreates_network(
         self, executor: DockerExecutor
     ) -> None:
         plan = self._plan(
-            services=[ServiceSpec(
-                id="redis",
-                image="redis:7-alpine",
-                aliases=["redis"],
-                command=None,
-                volumes=[],
-            )]
+            resources=[
+                ResourceSpec(
+                    id="redis",
+                    kind="cache",
+                    lifetime=ResourceLifetime.MANAGED,
+                    driver=ResourceDriver.DOCKER_CONTAINER,
+                    image="redis:7-alpine",
+                    aliases=["redis"],
+                )
+            ]
         )
-        with pytest.raises(ConfigurationError, match="services require network"):
-            executor.start(plan)
+        calls: list[list[str]] = []
 
-    def test_start_creates_network_and_starts_service_containers(
+        def _fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            if cmd[:3] == ["docker", "network", "inspect"]:
+                return subprocess.CompletedProcess(cmd, 1)
+            if cmd[:2] == ["docker", "inspect"]:
+                payload = [{"State": {"Status": "running"}}]
+                return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(payload))
+            return subprocess.CompletedProcess(cmd, 0)
+
+        with patch(
+            "orchestrator.executor.docker_executor.subprocess.run",
+            side_effect=_fake_run,
+        ), patch("orchestrator.executor.docker_executor.time.sleep", return_value=None):
+            executor.start(plan)
+        assert executor._network is not None
+        assert executor._network_created is True
+        assert any(cmd[:3] == ["docker", "run", "-d"] for cmd in calls)
+
+    def test_start_creates_network_and_starts_resource_containers(
         self, executor: DockerExecutor
     ) -> None:
-        redis = ServiceSpec(
+        redis = ResourceSpec(
             id="redis",
+            kind="cache",
+            lifetime=ResourceLifetime.MANAGED,
+            driver=ResourceDriver.DOCKER_CONTAINER,
             image="redis:7-alpine",
             aliases=["redis"],
             command=["redis-server", "--appendonly", "yes"],
@@ -311,31 +382,45 @@ class TestPipelineLifecycle:
             ],
             env_vars={"REDIS_PASSWORD": "secret"},
         )
-        queue = ServiceSpec(
+        queue = ResourceSpec(
             id="queue",
+            kind="cache",
+            lifetime=ResourceLifetime.MANAGED,
+            driver=ResourceDriver.DOCKER_CONTAINER,
             image="memcached:1.6",
             aliases=["cache-queue"],
         )
-        plan = self._plan(network="build-net", services=[redis, queue])
+        plan = self._plan(resource_network="build-net", resources=[redis, queue])
 
         calls: list[list[str]] = []
+        inspect_calls = 0
 
         def _fake_run(cmd, **kwargs):
+            nonlocal inspect_calls
             calls.append(cmd)
             if cmd[:4] == ["docker", "network", "inspect", "build-net"]:
                 return subprocess.CompletedProcess(cmd, 1)
+            if cmd[:2] == ["docker", "inspect"]:
+                inspect_calls += 1
+                payload = [{"State": {"Status": "running"}}]
+                return subprocess.CompletedProcess(
+                    cmd, 0, stdout=json.dumps(payload)
+                )
             return subprocess.CompletedProcess(cmd, 0)
 
         with patch(
             "orchestrator.executor.docker_executor.subprocess.run",
             side_effect=_fake_run,
-        ):
+        ), patch("orchestrator.executor.docker_executor.time.sleep", return_value=None):
             executor.start(plan)
 
         assert ["docker", "network", "inspect", "build-net"] in calls
         assert ["docker", "network", "create", "build-net"] in calls
         run_cmds = [cmd for cmd in calls if cmd[:3] == ["docker", "run", "-d"]]
         assert len(run_cmds) == 2
+        inspect_cmds = [cmd for cmd in calls if cmd[:2] == ["docker", "inspect"]]
+        assert len(inspect_cmds) == 4
+        assert inspect_calls == 4
         redis_cmd = next(cmd for cmd in run_cmds if "redis:7-alpine" in cmd)
         assert "--network" in redis_cmd
         assert "build-net" in redis_cmd
@@ -344,14 +429,75 @@ class TestPipelineLifecycle:
         assert "-v" in redis_cmd
         assert "/host/cache:/data" in redis_cmd
 
-    def test_stop_stops_services_and_removes_created_network(
+    def test_start_waits_for_healthcheck_before_dispatching_jobs(
         self, executor: DockerExecutor
     ) -> None:
-        services = [
-            ServiceSpec(id="redis", image="redis:7-alpine", aliases=["redis"]),
-            ServiceSpec(id="queue", image="memcached:1.6", aliases=["cache-queue"]),
+        resource = ResourceSpec(
+            id="redis",
+            kind="cache",
+            lifetime=ResourceLifetime.MANAGED,
+            driver=ResourceDriver.DOCKER_CONTAINER,
+            image="redis:7-alpine",
+            aliases=["redis"],
+        )
+        plan = self._plan(resource_network="build-net", resources=[resource])
+
+        calls: list[list[str]] = []
+        inspect_statuses = iter(["starting", "healthy"])
+
+        def _fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            if cmd[:4] == ["docker", "network", "inspect", "build-net"]:
+                return subprocess.CompletedProcess(cmd, 1)
+            if cmd[:2] == ["docker", "inspect"]:
+                health_status = next(inspect_statuses)
+                payload = [
+                    {
+                        "State": {
+                            "Status": "running",
+                            "Health": {"Status": health_status},
+                        }
+                    }
+                ]
+                return subprocess.CompletedProcess(
+                    cmd, 0, stdout=json.dumps(payload)
+                )
+            return subprocess.CompletedProcess(cmd, 0)
+
+        with patch(
+            "orchestrator.executor.docker_executor.subprocess.run",
+            side_effect=_fake_run,
+        ), patch("orchestrator.executor.docker_executor.time.sleep", return_value=None):
+            executor.start(plan)
+
+        inspect_cmds = [cmd for cmd in calls if cmd[:2] == ["docker", "inspect"]]
+        assert len(inspect_cmds) == 2
+        run_index = calls.index(next(cmd for cmd in calls if cmd[:3] == ["docker", "run", "-d"]))
+        inspect_index = calls.index(inspect_cmds[0])
+        assert run_index < inspect_index
+
+    def test_stop_stops_resources_and_removes_created_network(
+        self, executor: DockerExecutor
+    ) -> None:
+        resources = [
+            ResourceSpec(
+                id="redis",
+                kind="cache",
+                lifetime=ResourceLifetime.MANAGED,
+                driver=ResourceDriver.DOCKER_CONTAINER,
+                image="redis:7-alpine",
+                aliases=["redis"],
+            ),
+            ResourceSpec(
+                id="queue",
+                kind="cache",
+                lifetime=ResourceLifetime.MANAGED,
+                driver=ResourceDriver.DOCKER_CONTAINER,
+                image="memcached:1.6",
+                aliases=["cache-queue"],
+            ),
         ]
-        plan = self._plan(network="build-net", services=services)
+        plan = self._plan(resource_network="build-net", resources=resources)
 
         calls: list[list[str]] = []
 
@@ -359,12 +505,15 @@ class TestPipelineLifecycle:
             calls.append(cmd)
             if cmd[:4] == ["docker", "network", "inspect", "build-net"]:
                 return subprocess.CompletedProcess(cmd, 1)
+            if cmd[:2] == ["docker", "inspect"]:
+                payload = [{"State": {"Status": "running"}}]
+                return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(payload))
             return subprocess.CompletedProcess(cmd, 0)
 
         with patch(
             "orchestrator.executor.docker_executor.subprocess.run",
             side_effect=_fake_run,
-        ):
+        ), patch("orchestrator.executor.docker_executor.time.sleep", return_value=None):
             executor.start(plan)
             executor.stop()
 
@@ -372,5 +521,5 @@ class TestPipelineLifecycle:
         assert len(stop_calls) == 2
         for call in stop_calls:
             assert len(call) == 3
-            assert call[2].startswith("orch_service_")
+            assert call[2].startswith("orch_resource_")
         assert ["docker", "network", "rm", "build-net"] in calls

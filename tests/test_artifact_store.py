@@ -5,8 +5,16 @@ import pytest
 from pathlib import Path
 
 from orchestrator.artifact_store import ArtifactStore
-from orchestrator.exceptions import ArtifactError
-from orchestrator.models import ArtifactSpec, JobResult, JobSpec, ResourceWeight
+from orchestrator.exceptions import ArtifactError, ConfigurationError
+from orchestrator.models import (
+    ArtifactSpec,
+    JobResult,
+    JobSpec,
+    ResourceDriver,
+    ResourceLifetime,
+    ResourceSpec,
+    ResourceWeight,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -33,6 +41,20 @@ def _make_result(job_id: str = "job_a", tmp_path: Path | None = None) -> JobResu
         exit_code=0,
         duration_seconds=1.0,
         log_path=(tmp_path or Path("/tmp")) / f"{job_id}.log",
+    )
+
+
+def _make_resource(
+    resource_id: str = "redis",
+    artifacts: list[ArtifactSpec] | None = None,
+) -> ResourceSpec:
+    return ResourceSpec(
+        id=resource_id,
+        kind="cache",
+        lifetime=ResourceLifetime.MANAGED,
+        driver=ResourceDriver.DOCKER_CONTAINER,
+        image="redis:7-alpine",
+        artifacts=artifacts or [ArtifactSpec(source_glob="*.txt", destination_subdir="resources")],
     )
 
 
@@ -85,7 +107,42 @@ class TestCollect:
         store = ArtifactStore(staging_dir=staging, container_output_root=output_root)
         store.collect(job, _make_result())
 
-        assert (staging / "out" / "data.bin").read_bytes() == b"nested"
+        assert (staging / "out" / "nested" / "deep" / "data.bin").read_bytes() == b"nested"
+
+    def test_collect_raises_on_target_collision(self, tmp_path: Path) -> None:
+        staging = tmp_path / "staging"
+        output_root = tmp_path / "container_output"
+
+        (output_root / "job_a" / "dir").mkdir(parents=True)
+        (output_root / "job_a" / "dir" / "report.bin").write_bytes(b"one")
+        (output_root / "job_a" / "report.bin").write_bytes(b"two")
+
+        job = _make_job(artifacts=[
+            ArtifactSpec(source_glob="report.bin", destination_subdir="dir"),
+            ArtifactSpec(source_glob="dir/*.bin", destination_subdir=""),
+        ])
+        store = ArtifactStore(staging_dir=staging, container_output_root=output_root)
+
+        with pytest.raises(ArtifactError, match="collision"):
+            store.collect(job, _make_result())
+
+        assert not staging.exists() or not any(staging.rglob("*"))
+
+    def test_collect_resource_preserves_recursive_paths(self, tmp_path: Path) -> None:
+        staging = tmp_path / "staging"
+        output_root = tmp_path / "container_output"
+        resource_dir = output_root / "resources" / "redis" / "nested" / "logs"
+        resource_dir.mkdir(parents=True, exist_ok=True)
+        (resource_dir / "dump.txt").write_text("ready", encoding="utf-8")
+
+        store = ArtifactStore(staging_dir=staging, container_output_root=output_root)
+        store.collect_resource(
+            _make_resource(
+                artifacts=[ArtifactSpec(source_glob="**/*.txt", destination_subdir="resources")]
+            )
+        )
+
+        assert (staging / "resources" / "nested" / "logs" / "dump.txt").read_text(encoding="utf-8") == "ready"
 
     def test_collect_multiple_artifact_specs(self, tmp_path: Path) -> None:
         staging = tmp_path / "staging"
@@ -157,6 +214,47 @@ class TestCollect:
 
         assert (staging / "out" / "real.bin").exists()
         assert not (staging / "out" / "tricky.bin").exists()
+
+    def test_collect_resource_copies_matching_files_to_staging(self, tmp_path: Path) -> None:
+        staging = tmp_path / "staging"
+        output_root = tmp_path / "container_output"
+        resource_dir = output_root / "resources" / "redis"
+        resource_dir.mkdir(parents=True, exist_ok=True)
+        (resource_dir / "dump.txt").write_text("ready", encoding="utf-8")
+
+        store = ArtifactStore(staging_dir=staging, container_output_root=output_root)
+        store.collect_resource(_make_resource())
+
+        assert (staging / "resources" / "dump.txt").read_text(encoding="utf-8") == "ready"
+
+    def test_collect_resource_raises_when_glob_matches_nothing(self, tmp_path: Path) -> None:
+        staging = tmp_path / "staging"
+        output_root = tmp_path / "container_output"
+        resource_dir = output_root / "resources" / "redis"
+        resource_dir.mkdir(parents=True, exist_ok=True)
+
+        store = ArtifactStore(staging_dir=staging, container_output_root=output_root)
+
+        with pytest.raises(ArtifactError, match="resource 'redis'"):
+            store.collect_resource(_make_resource())
+
+    @pytest.mark.parametrize("job_id", ["../escape", "a/b", "job name", "con"])
+    def test_collect_rejects_unsafe_job_ids(self, tmp_path: Path, job_id: str) -> None:
+        staging = tmp_path / "staging"
+        output_root = tmp_path / "container_output"
+        store = ArtifactStore(staging_dir=staging, container_output_root=output_root)
+
+        with pytest.raises(ConfigurationError, match="single path component|Windows reserved name"):
+            store.collect(_make_job(job_id), _make_result(job_id))
+
+    @pytest.mark.parametrize("resource_id", ["../escape", "a/b", "resource name", "aux"])
+    def test_collect_rejects_unsafe_resource_ids(self, tmp_path: Path, resource_id: str) -> None:
+        staging = tmp_path / "staging"
+        output_root = tmp_path / "container_output"
+        store = ArtifactStore(staging_dir=staging, container_output_root=output_root)
+
+        with pytest.raises(ConfigurationError, match="single path component|Windows reserved name"):
+            store.collect_resource(_make_resource(resource_id))
 
 
 # ---------------------------------------------------------------------------

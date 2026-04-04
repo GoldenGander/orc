@@ -10,7 +10,7 @@ import pytest
 
 from orchestrator.artifact_store import ArtifactStoreABC
 from orchestrator.engine import Engine
-from orchestrator.exceptions import CyclicDependencyError
+from orchestrator.exceptions import ArtifactError, CyclicDependencyError
 from orchestrator.executor import ExecutorABC
 from orchestrator.logger import JobLoggerABC
 from orchestrator.models import (
@@ -20,6 +20,9 @@ from orchestrator.models import (
     JobResult,
     JobSpec,
     OrchestratorResult,
+    ResourceDriver,
+    ResourceLifetime,
+    ResourceSpec,
     ResourceWeight,
 )
 from orchestrator.pipeline import IPipelineReporter
@@ -82,6 +85,7 @@ class FakeArtifactStore(ArtifactStoreABC):
 
     def __init__(self) -> None:
         self.collected: list[tuple[str, str]] = []  # (job_id, success)
+        self.collected_resources: list[str] = []
         self.finalized_to: Path | None = None
 
     @override
@@ -89,8 +93,50 @@ class FakeArtifactStore(ArtifactStoreABC):
         self.collected.append((job.id, "success" if result.success else "failure"))
 
     @override
+    def collect_resource(self, resource: ResourceSpec) -> None:
+        self.collected_resources.append(resource.id)
+
+    @override
     def finalize(self, output_root: Path) -> None:
         self.finalized_to = output_root
+
+
+class FailingArtifactStore(FakeArtifactStore):
+    def __init__(
+        self,
+        *,
+        fail_on_collect: bool = False,
+        fail_on_collect_resource: bool = False,
+        fail_on_finalize: bool = False,
+    ) -> None:
+        super().__init__()
+        self.fail_on_collect = fail_on_collect
+        self.fail_on_collect_resource = fail_on_collect_resource
+        self.fail_on_finalize = fail_on_finalize
+        self.collect_calls = 0
+        self.collect_resource_calls = 0
+        self.finalize_calls = 0
+
+    @override
+    def collect(self, job: JobSpec, result: JobResult) -> None:
+        self.collect_calls += 1
+        if self.fail_on_collect:
+            raise ArtifactError(f"collect failed for {job.id}")
+        super().collect(job, result)
+
+    @override
+    def collect_resource(self, resource: ResourceSpec) -> None:
+        self.collect_resource_calls += 1
+        if self.fail_on_collect_resource:
+            raise ArtifactError(f"collect failed for resource {resource.id}")
+        super().collect_resource(resource)
+
+    @override
+    def finalize(self, output_root: Path) -> None:
+        self.finalize_calls += 1
+        if self.fail_on_finalize:
+            raise ArtifactError("finalize failed")
+        super().finalize(output_root)
 
 
 class FakeLogger(JobLoggerABC):
@@ -152,6 +198,7 @@ def _plan(
     max_parallel: int = 4,
     cpu: int = 8,
     mem: int = 8,
+    resources: list[ResourceSpec] | None = None,
 ) -> BuildPlan:
     return BuildPlan(
         jobs=jobs,
@@ -159,6 +206,7 @@ def _plan(
         max_parallel=max_parallel,
         total_cpu_slots=cpu,
         total_memory_slots=mem,
+        resources=resources or [],
     )
 
 
@@ -169,6 +217,17 @@ def _fail_result(job_id: str, exit_code: int = 1) -> JobResult:
         exit_code=exit_code,
         duration_seconds=0.01,
         log_path=Path(f"/tmp/{job_id}.log"),
+    )
+
+
+def _resource(resource_id: str, artifacts: list[ArtifactSpec] | None = None) -> ResourceSpec:
+    return ResourceSpec(
+        id=resource_id,
+        kind="cache",
+        lifetime=ResourceLifetime.MANAGED,
+        driver=ResourceDriver.DOCKER_CONTAINER,
+        image=f"registry/{resource_id}:latest",
+        artifacts=artifacts or [ArtifactSpec(source_glob="*.txt", destination_subdir="resources")],
     )
 
 
@@ -294,6 +353,79 @@ class TestArtifactCollection:
         _ = engine.run(plan)
 
         assert ar.finalized_to is not None
+
+    def test_resource_artifacts_collected_when_declared(self) -> None:
+        plan = _plan([_job("a")], resources=[_resource("redis")])
+        engine, _, ar, _ = _build_engine(plan)
+
+        _ = engine.run(plan)
+
+        assert ar.collected_resources == ["redis"]
+
+    def test_resource_artifacts_not_collected_when_not_declared(self) -> None:
+        plan = _plan(
+            [_job("a")],
+            resources=[
+                ResourceSpec(
+                    id="redis",
+                    kind="cache",
+                    lifetime=ResourceLifetime.MANAGED,
+                    driver=ResourceDriver.DOCKER_CONTAINER,
+                    image="redis:7-alpine",
+                )
+            ],
+        )
+        engine, _, ar, _ = _build_engine(plan)
+
+        _ = engine.run(plan)
+
+        assert ar.collected_resources == []
+
+    def test_collect_failure_returns_result_and_stops_executor(self) -> None:
+        plan = _plan([_job("a")])
+        ar = FailingArtifactStore(fail_on_collect=True)
+        engine, ex, ar, rp = _build_engine(plan, artifact_store=ar)
+
+        result = engine.run(plan)
+
+        assert result.success is False
+        assert len(result.job_results) == 1
+        assert result.job_results[0].success is True
+        assert ar.collect_calls == 1
+        assert ar.finalize_calls == 1
+        assert rp.final_result == result
+        assert ex.stopped is True
+
+    def test_finalize_failure_returns_result_and_stops_executor(self) -> None:
+        plan = _plan([_job("a")])
+        ar = FailingArtifactStore(fail_on_finalize=True)
+        engine, ex, ar, rp = _build_engine(plan, artifact_store=ar)
+
+        result = engine.run(plan)
+
+        assert result.success is False
+        assert len(result.job_results) == 1
+        assert result.job_results[0].success is True
+        assert ar.collect_calls == 1
+        assert ar.finalize_calls == 1
+        assert ar.finalized_to is None
+        assert rp.final_result == result
+        assert ex.stopped is True
+
+    def test_resource_collect_failure_returns_result_and_stops_executor(self) -> None:
+        plan = _plan([_job("a")], resources=[_resource("redis")])
+        ar = FailingArtifactStore(fail_on_collect_resource=True)
+        engine, ex, ar, rp = _build_engine(plan, artifact_store=ar)
+
+        result = engine.run(plan)
+
+        assert result.success is False
+        assert len(result.job_results) == 1
+        assert ar.collect_calls == 1
+        assert ar.collect_resource_calls == 1
+        assert ar.finalize_calls == 1
+        assert rp.final_result == result
+        assert ex.stopped is True
 
 
 class TestReporting:
