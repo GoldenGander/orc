@@ -6,6 +6,7 @@ from pathlib import Path
 
 from orchestrator.graph import DependencyGraph
 from orchestrator.artifact_store import ArtifactStoreABC
+from orchestrator.exceptions import ArtifactError
 from orchestrator.executor import ExecutorABC
 from orchestrator.logger import JobLoggerABC
 from orchestrator.scheduler import SchedulerABC
@@ -66,6 +67,7 @@ class Engine:
         results: list[JobResult] = []
         in_flight: dict[Future[JobResult], str] = {}
         cancelling = False
+        artifact_failure: ArtifactError | None = None
 
         try:
             self._executor.start(plan)
@@ -117,7 +119,16 @@ class Engine:
 
                     if result.success:
                         completed.add(job_id)
-                        self._artifact_store.collect(job, result)
+                        try:
+                            self._artifact_store.collect(job, result)
+                        except ArtifactError as exc:
+                            artifact_failure = artifact_failure or exc
+                            cancelling = True
+                            logger.error(
+                                "Artifact collection failed for job %s: %s",
+                                job_id,
+                                exc,
+                            )
                         self._reporter.report_job_completed(job_id, True)
                         logger.info("Job %s succeeded (%.1fs)", job_id, result.duration_seconds)
                     else:
@@ -131,14 +142,32 @@ class Engine:
                         )
                         if plan.failure_policy == FailurePolicy.FAIL_FAST:
                             cancelling = True
+
         finally:
             self._executor.stop()
 
+        for resource in plan.resources:
+            if not resource.artifacts:
+                continue
+            try:
+                self._artifact_store.collect_resource(resource)
+            except ArtifactError as exc:
+                artifact_failure = artifact_failure or exc
+                logger.error(
+                    "Artifact collection failed for resource %s: %s",
+                    resource.id,
+                    exc,
+                )
+
         # ---- finalize ----
-        self._artifact_store.finalize(self._output_root)
+        try:
+            self._artifact_store.finalize(self._output_root)
+        except ArtifactError as exc:
+            artifact_failure = artifact_failure or exc
+            logger.error("Artifact finalization failed: %s", exc)
 
         orchestrator_result = OrchestratorResult(
-            success=len(failed) == 0,
+            success=len(failed) == 0 and artifact_failure is None,
             job_results=tuple(results),
         )
         self._reporter.report_result(orchestrator_result)

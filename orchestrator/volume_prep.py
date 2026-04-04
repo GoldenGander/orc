@@ -1,21 +1,24 @@
 """Injects system-managed volume mounts into a BuildPlan.
 
-Source and artifact-output mounts are pipeline-level concerns — individual
-jobs should not need to declare them.  This module adds them to every job
-before the plan is handed to the engine.
+Source and artifact-output mounts are pipeline-level concerns. Jobs get
+the standard source + output mounts, while managed resources get a managed output
+mount so they can write optional first-class artifacts to a consistent
+host location.
 
 Container path conventions:
-    /src     — read-only source tree (agent checkout)
-    /output  — writable artifact output directory (per-job on host)
+    /src     — read-only source tree (jobs only)
+    /output  — writable artifact output directory
 """
 from __future__ import annotations
 
 from pathlib import Path
 
 from orchestrator.models import BuildPlan, VolumeMount
+from orchestrator.path_safety import require_safe_path_component
 
 CONTAINER_SOURCE_PATH = "/src"
 CONTAINER_OUTPUT_PATH = "/output"
+RESOURCE_OUTPUT_DIRNAME = "resources"
 
 
 def prepare_volumes(
@@ -23,21 +26,27 @@ def prepare_volumes(
     source_dir: Path,
     container_output_root: Path,
 ) -> None:
-    """Append source and output volume mounts to every job in the plan.
+    """Append managed source/output mounts to jobs and output mounts to resources.
 
     For each job the function:
     1. Creates ``container_output_root / <job_id>`` on the host.
     2. Appends a read-only bind mount  source_dir → /src.
     3. Appends a read-write bind mount  container_output_root/<job_id> → /output.
 
+    For each managed resource the function:
+    1. Creates ``container_output_root / resources / <resource_id>`` on the host.
+    2. Appends a read-write bind mount of that directory → /output.
+
     Args:
         plan: The BuildPlan whose jobs will be mutated in place.
         source_dir: Absolute host path to the checked-out source tree.
         container_output_root: Absolute host path under which per-job
-            output directories are created.
+            and per-resource output directories are created.
     """
     for job in plan.jobs:
-        job_output_dir = container_output_root / job.id
+        job_output_dir = container_output_root / require_safe_path_component(
+            job.id, owner_label="Job", field_name="id"
+        )
         job_output_dir.mkdir(parents=True, exist_ok=True)
 
         job.volumes.append(
@@ -50,6 +59,21 @@ def prepare_volumes(
         job.volumes.append(
             VolumeMount(
                 host_path=str(job_output_dir),
+                container_path=CONTAINER_OUTPUT_PATH,
+                read_only=False,
+            )
+        )
+
+    for resource in plan.resources:
+        if resource.lifetime.value != "managed":
+            continue
+        resource_output_dir = container_output_root / RESOURCE_OUTPUT_DIRNAME / require_safe_path_component(
+            resource.id, owner_label="Resource", field_name="id"
+        )
+        resource_output_dir.mkdir(parents=True, exist_ok=True)
+        resource.volumes.append(
+            VolumeMount(
+                host_path=str(resource_output_dir),
                 container_path=CONTAINER_OUTPUT_PATH,
                 read_only=False,
             )
