@@ -7,21 +7,19 @@ from orchestrator.models import BuildPlan, JobResult, JobSpec
 
 
 class ExecutorABC(ABC):
-    """Submits jobs for concurrent execution inside Docker containers.
+    """Submits jobs for concurrent execution.
 
-    Abstracts the concurrency backend so the engine dispatch loop is
-    backend-agnostic. Each submitted job maps directly to one container run:
-    `docker run <image> <command>` (or the image default if command is None).
+    Abstracts the execution backend so the engine dispatch loop can stay
+    backend-agnostic even when the concrete runtime is container-based.
     """
 
     @abstractmethod
     def submit(self, job: JobSpec) -> Future[JobResult]:
-        """Spawn a container for the job and return a Future for its result.
+        """Start a job and return a Future for its result.
 
-        The executor pulls the image declared in job.image, passes job.command
-        as the container command (or uses the image entrypoint if None), injects
-        job.env_vars, and resolves the Future with a JobResult once the
-        container exits.
+        The concrete executor is responsible for interpreting the job spec,
+        applying the backend-specific runtime contract, and resolving the
+        Future with a JobResult once execution completes.
 
         Args:
             job: The job to execute.
