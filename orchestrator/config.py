@@ -8,13 +8,16 @@ from typing import Any, override
 import yaml
 
 from orchestrator.exceptions import ConfigurationError
+from orchestrator.path_safety import require_safe_path_component
 from orchestrator.models import (
     ArtifactSpec,
     BuildPlan,
     FailurePolicy,
     JobSpec,
+    ResourceDriver,
+    ResourceLifetime,
+    ResourceSpec,
     ResourceWeight,
-    ServiceSpec,
     VolumeMount,
 )
 
@@ -44,6 +47,7 @@ class RawJobConfig:
     image: str
     depends_on: list[str] = field(default_factory=list)
     command: list[str] | None = None
+    timeout_seconds: int | None = None
     cpu_slots: int = 1
     memory_slots: int = 1
     artifacts: list[RawArtifactConfig] = field(default_factory=list)
@@ -52,13 +56,18 @@ class RawJobConfig:
 
 
 @dataclass
-class RawServiceConfig:
-    """Schema for a pipeline-wide service container."""
+class RawResourceConfig:
+    """Schema for a pipeline-wide shared resource."""
 
     id: str
-    image: str
+    kind: str = "generic"
+    lifetime: str = ResourceLifetime.MANAGED.value
+    driver: str = ResourceDriver.DOCKER_CONTAINER.value
+    image: str | None = None
+    endpoint: str | None = None
     aliases: list[str] = field(default_factory=list)
     command: list[str] | None = None
+    artifacts: list[RawArtifactConfig] = field(default_factory=list)
     volumes: list[RawVolumeConfig] = field(default_factory=list)
     env_vars: dict[str, str] = field(default_factory=dict)
 
@@ -72,8 +81,9 @@ class RawPipelineConfig:
     max_parallel: int = 4
     total_cpu_slots: int = 8
     total_memory_slots: int = 8
-    network: str | None = None
-    services: list[RawServiceConfig] = field(default_factory=list)
+    job_timeout_seconds: int | None = 3600
+    resource_network: str | None = None
+    resources: list[RawResourceConfig] = field(default_factory=list)
 
 
 class IConfigLoader(ABC):
@@ -165,8 +175,17 @@ class YamlConfigLoader(IConfigLoader):
             max_parallel=_expect_int(data, "max_parallel", default=4),
             total_cpu_slots=_expect_int(data, "total_cpu_slots", default=8),
             total_memory_slots=_expect_int(data, "total_memory_slots", default=8),
-            network=_parse_optional_string(data, "network"),
-            services=_parse_services(data.get("services", [])),
+            job_timeout_seconds=_expect_optional_int(
+                data, "job_timeout_seconds", default=3600
+            ),
+            resource_network=_parse_optional_string(
+                data,
+                "resource_network",
+                legacy_key="network",
+            ),
+            resources=_parse_resources(
+                data.get("resources", data.get("services", [])),
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -187,15 +206,16 @@ class YamlConfigLoader(IConfigLoader):
             raise ConfigurationError("total_cpu_slots must be >= 1")
         if raw.total_memory_slots < 1:
             raise ConfigurationError("total_memory_slots must be >= 1")
-        if raw.network is not None and not raw.network:
-            raise ConfigurationError("network must not be empty")
-        if raw.services and raw.network is None:
-            raise ConfigurationError(
-                "services require network so jobs can reach service containers"
-            )
+        if raw.job_timeout_seconds is not None and raw.job_timeout_seconds < 1:
+            raise ConfigurationError("job_timeout_seconds must be >= 1")
+        if raw.resource_network is not None and not raw.resource_network:
+            raise ConfigurationError("resource_network must not be empty")
 
         seen_ids: set[str] = set()
         for job in raw.jobs:
+            require_safe_path_component(job.id, owner_label="Job", field_name="id")
+            if not job.image:
+                raise ConfigurationError(f"Job '{job.id}': image must not be empty")
             if job.id in seen_ids:
                 raise ConfigurationError(f"Duplicate job id '{job.id}'")
             seen_ids.add(job.id)
@@ -213,17 +233,70 @@ class YamlConfigLoader(IConfigLoader):
                 raise ConfigurationError(f"Job '{job.id}': cpu_slots must be >= 1")
             if job.memory_slots < 1:
                 raise ConfigurationError(f"Job '{job.id}': memory_slots must be >= 1")
+            if job.timeout_seconds is not None and job.timeout_seconds < 1:
+                raise ConfigurationError(f"Job '{job.id}': timeout_seconds must be >= 1")
+            for index, artifact in enumerate(job.artifacts):
+                _validate_artifact_destination_subdir(
+                    artifact.destination_subdir,
+                    owner_label=f"Job '{job.id}'",
+                    artifact_index=index,
+                )
 
-        seen_service_ids: set[str] = set()
-        for service in raw.services:
-            if not service.id:
-                raise ConfigurationError("services[].id must not be empty")
-            if service.id in seen_service_ids:
-                raise ConfigurationError(f"Duplicate service id '{service.id}'")
-            seen_service_ids.add(service.id)
-            for alias in service.aliases:
+        seen_resource_ids: set[str] = set()
+        for resource in raw.resources:
+            require_safe_path_component(
+                resource.id, owner_label="Resource", field_name="id"
+            )
+            if resource.id in seen_resource_ids:
+                raise ConfigurationError(f"Duplicate resource id '{resource.id}'")
+            seen_resource_ids.add(resource.id)
+            if resource.lifetime not in {l.value for l in ResourceLifetime}:
+                raise ConfigurationError(
+                    f"Resource '{resource.id}': invalid lifetime '{resource.lifetime}'"
+                )
+            if resource.driver not in {d.value for d in ResourceDriver}:
+                raise ConfigurationError(
+                    f"Resource '{resource.id}': invalid driver '{resource.driver}'"
+                )
+            if not resource.kind:
+                raise ConfigurationError(f"Resource '{resource.id}': kind must not be empty")
+            for alias in resource.aliases:
                 if not alias:
-                    raise ConfigurationError(f"Service '{service.id}': aliases must not be empty")
+                    raise ConfigurationError(
+                        f"Resource '{resource.id}': aliases must not be empty"
+                    )
+            if resource.driver == ResourceDriver.DOCKER_CONTAINER.value:
+                if resource.lifetime != ResourceLifetime.MANAGED.value:
+                    raise ConfigurationError(
+                        f"Resource '{resource.id}': docker_container resources must use lifetime 'managed'"
+                    )
+                if not resource.image:
+                    raise ConfigurationError(
+                        f"Resource '{resource.id}': image must not be empty for managed docker_container resources"
+                    )
+            if resource.driver == ResourceDriver.EXTERNAL.value:
+                if resource.lifetime != ResourceLifetime.EXTERNAL.value:
+                    raise ConfigurationError(
+                        f"Resource '{resource.id}': external resources must use lifetime 'external'"
+                    )
+                if not resource.endpoint:
+                    raise ConfigurationError(
+                        f"Resource '{resource.id}': endpoint must not be empty for external resources"
+                    )
+                if resource.image:
+                    raise ConfigurationError(
+                        f"Resource '{resource.id}': image is not supported for external resources"
+                    )
+                if resource.command is not None:
+                    raise ConfigurationError(
+                        f"Resource '{resource.id}': command is not supported for external resources"
+                    )
+            for index, artifact in enumerate(resource.artifacts):
+                _validate_artifact_destination_subdir(
+                    artifact.destination_subdir,
+                    owner_label=f"Resource '{resource.id}'",
+                    artifact_index=index,
+                )
 
     # ------------------------------------------------------------------
     # Conversion
@@ -248,6 +321,7 @@ class YamlConfigLoader(IConfigLoader):
                     for a in rj.artifacts
                 ],
                 command=rj.command,
+                timeout_seconds=rj.timeout_seconds,
                 volumes=[
                     VolumeMount(
                         host_path=v.host_path,
@@ -266,24 +340,36 @@ class YamlConfigLoader(IConfigLoader):
             max_parallel=raw.max_parallel,
             total_cpu_slots=raw.total_cpu_slots,
             total_memory_slots=raw.total_memory_slots,
-            network=raw.network,
-            services=[
-                ServiceSpec(
-                    id=service.id,
-                    image=service.image,
-                    aliases=service.aliases if service.aliases else [service.id],
-                    command=service.command,
+            job_timeout_seconds=raw.job_timeout_seconds,
+            resource_network=raw.resource_network,
+            resources=[
+                ResourceSpec(
+                    id=resource.id,
+                    kind=resource.kind,
+                    lifetime=ResourceLifetime(resource.lifetime),
+                    driver=ResourceDriver(resource.driver),
+                    image=resource.image,
+                    endpoint=resource.endpoint,
+                    aliases=resource.aliases if resource.aliases else [resource.id],
+                    command=resource.command,
+                    artifacts=[
+                        ArtifactSpec(
+                            source_glob=artifact.source_glob,
+                            destination_subdir=artifact.destination_subdir,
+                        )
+                        for artifact in resource.artifacts
+                    ],
                     volumes=[
                         VolumeMount(
                             host_path=v.host_path,
                             container_path=v.container_path,
                             read_only=v.read_only,
                         )
-                        for v in service.volumes
+                        for v in resource.volumes
                     ],
-                    env_vars=service.env_vars,
+                    env_vars=resource.env_vars,
                 )
-                for service in raw.services
+                for resource in raw.resources
             ],
         )
 
@@ -311,18 +397,9 @@ def _parse_job(entry: dict[str, Any], index: int) -> RawJobConfig:
         if not isinstance(command, list) or not all(isinstance(c, str) for c in command):
             raise ConfigurationError(f"{prefix}.command: expected a list of strings or null")
 
-    artifacts: list[RawArtifactConfig] = []
-    for j, art in enumerate(entry.get("artifacts", [])):
-        if not isinstance(art, dict):
-            raise ConfigurationError(f"{prefix}.artifacts[{j}]: expected a mapping")
-        if "source_glob" not in art:
-            raise ConfigurationError(f"{prefix}.artifacts[{j}]: missing 'source_glob'")
-        artifacts.append(
-            RawArtifactConfig(
-                source_glob=str(art["source_glob"]),
-                destination_subdir=str(art.get("destination_subdir", "")),
-            )
-        )
+    timeout_seconds = _expect_optional_int(
+        entry, "timeout_seconds", default=None, prefix=prefix
+    )
 
     volumes = _parse_volumes(entry.get("volumes", []), prefix=f"{prefix}.volumes")
 
@@ -336,9 +413,10 @@ def _parse_job(entry: dict[str, Any], index: int) -> RawJobConfig:
         image=entry["image"],
         depends_on=depends_on,
         command=command,
+        timeout_seconds=timeout_seconds,
         cpu_slots=_expect_int(entry, "cpu_slots", default=1, prefix=prefix),
         memory_slots=_expect_int(entry, "memory_slots", default=1, prefix=prefix),
-        artifacts=artifacts,
+        artifacts=_parse_artifacts(entry.get("artifacts", []), prefix=f"{prefix}.artifacts"),
         volumes=volumes,
         env_vars=env_vars,
     )
@@ -358,8 +436,31 @@ def _expect_int(
     return value
 
 
-def _parse_optional_string(data: dict[str, Any], key: str) -> str | None:
+def _expect_optional_int(
+    data: dict[str, Any],
+    key: str,
+    *,
+    default: int | None,
+    prefix: str = "",
+) -> int | None:
+    value = data.get(key, default)
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool):
+        loc = f"{prefix}.{key}" if prefix else key
+        raise ConfigurationError(f"{loc}: expected an integer or null, got {type(value).__name__}")
+    return value
+
+
+def _parse_optional_string(
+    data: dict[str, Any],
+    key: str,
+    *,
+    legacy_key: str | None = None,
+) -> str | None:
     value = data.get(key)
+    if value is None and legacy_key is not None:
+        value = data.get(legacy_key)
     if value is None:
         return None
     if not isinstance(value, str):
@@ -392,48 +493,109 @@ def _parse_volumes(raw_volumes: Any, prefix: str) -> list[RawVolumeConfig]:
     return volumes
 
 
-def _parse_services(raw_services: Any) -> list[RawServiceConfig]:
-    if not isinstance(raw_services, list):
-        raise ConfigurationError("services: expected a list")
+def _parse_resources(raw_resources: Any) -> list[RawResourceConfig]:
+    if not isinstance(raw_resources, list):
+        raise ConfigurationError("resources: expected a list")
 
-    services: list[RawServiceConfig] = []
-    for i, raw_service in enumerate(raw_services):
-        prefix = f"services[{i}]"
-        if not isinstance(raw_service, dict):
+    resources: list[RawResourceConfig] = []
+    for i, raw_resource in enumerate(raw_resources):
+        prefix = f"resources[{i}]"
+        if not isinstance(raw_resource, dict):
             raise ConfigurationError(f"{prefix}: expected a mapping")
-        if "id" not in raw_service:
+        if "id" not in raw_resource:
             raise ConfigurationError(f"{prefix}: missing required key 'id'")
-        if "image" not in raw_service:
-            raise ConfigurationError(f"{prefix}: missing required key 'image'")
-
-        service_id = raw_service["id"]
-        image = raw_service["image"]
-        if not isinstance(service_id, str):
+        resource_id = raw_resource["id"]
+        if not isinstance(resource_id, str):
             raise ConfigurationError(f"{prefix}.id: expected a string")
-        if not isinstance(image, str):
-            raise ConfigurationError(f"{prefix}.image: expected a string")
+        kind = raw_resource.get("kind", "generic")
+        if not isinstance(kind, str):
+            raise ConfigurationError(f"{prefix}.kind: expected a string")
+        lifetime = raw_resource.get("lifetime", ResourceLifetime.MANAGED.value)
+        if not isinstance(lifetime, str):
+            raise ConfigurationError(f"{prefix}.lifetime: expected a string")
+        driver = raw_resource.get("driver", ResourceDriver.DOCKER_CONTAINER.value)
+        if not isinstance(driver, str):
+            raise ConfigurationError(f"{prefix}.driver: expected a string")
+        image = raw_resource.get("image")
+        if image is not None and not isinstance(image, str):
+            raise ConfigurationError(f"{prefix}.image: expected a string or null")
+        endpoint = raw_resource.get("endpoint")
+        if endpoint is not None and not isinstance(endpoint, str):
+            raise ConfigurationError(f"{prefix}.endpoint: expected a string or null")
 
-        aliases = raw_service.get("aliases", [])
+        aliases = raw_resource.get("aliases", [])
         if not isinstance(aliases, list) or not all(isinstance(a, str) for a in aliases):
             raise ConfigurationError(f"{prefix}.aliases: expected a list of strings")
 
-        command = raw_service.get("command")
+        command = raw_resource.get("command")
         if command is not None:
             if not isinstance(command, list) or not all(isinstance(c, str) for c in command):
                 raise ConfigurationError(f"{prefix}.command: expected a list of strings or null")
 
-        env_vars = raw_service.get("env_vars", {})
+        env_vars = raw_resource.get("env_vars", {})
         if not isinstance(env_vars, dict):
             raise ConfigurationError(f"{prefix}.env_vars: expected a mapping")
 
-        services.append(
-            RawServiceConfig(
-                id=service_id,
+        resources.append(
+            RawResourceConfig(
+                id=resource_id,
+                kind=kind,
+                lifetime=lifetime,
+                driver=driver,
                 image=image,
+                endpoint=endpoint,
                 aliases=aliases,
                 command=command,
-                volumes=_parse_volumes(raw_service.get("volumes", []), prefix=f"{prefix}.volumes"),
+                artifacts=_parse_artifacts(
+                    raw_resource.get("artifacts", []),
+                    prefix=f"{prefix}.artifacts",
+                ),
+                volumes=_parse_volumes(
+                    raw_resource.get("volumes", []),
+                    prefix=f"{prefix}.volumes",
+                ),
                 env_vars={str(k): str(v) for k, v in env_vars.items()},
             )
         )
-    return services
+    return resources
+
+
+def _validate_artifact_destination_subdir(
+    destination_subdir: str,
+    *,
+    owner_label: str,
+    artifact_index: int,
+) -> None:
+    if not destination_subdir:
+        return
+
+    path = Path(destination_subdir)
+    if (
+        destination_subdir.startswith(("/", "\\"))
+        or path.is_absolute()
+        or path.anchor
+        or any(part == ".." for part in path.parts)
+    ):
+        raise ConfigurationError(
+            f"{owner_label}: artifacts[{artifact_index}].destination_subdir "
+            f"must be a relative path without '..' segments"
+        )
+
+
+def _parse_artifacts(raw_artifacts: Any, prefix: str) -> list[RawArtifactConfig]:
+    if not isinstance(raw_artifacts, list):
+        raise ConfigurationError(f"{prefix}: expected a list")
+
+    artifacts: list[RawArtifactConfig] = []
+    for index, art in enumerate(raw_artifacts):
+        if not isinstance(art, dict):
+            raise ConfigurationError(f"{prefix}[{index}]: expected a mapping")
+        if "source_glob" not in art:
+            raise ConfigurationError(f"{prefix}[{index}]: missing 'source_glob'")
+        artifacts.append(
+            RawArtifactConfig(
+                source_glob=str(art["source_glob"]),
+                destination_subdir=str(art.get("destination_subdir", "")),
+            )
+        )
+    return artifacts
