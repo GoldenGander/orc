@@ -1,0 +1,60 @@
+failure_policy: fail_fast
+max_parallel: 2
+total_cpu_slots: 8
+total_memory_slots: 8
+resource_network: {network}
+
+resources:
+  - id: redis
+    kind: cache
+    driver: docker_container
+    image: redis:7-alpine
+    aliases: [redis]
+    command:
+      - redis-server
+      - --bind
+      - 0.0.0.0
+      - --protected-mode
+      - "no"
+      - --port
+      - "6379"
+      - --save
+      - "1 1"
+      - --appendonly
+      - "no"
+    volumes:
+      - host_path: "{redis_host_path}"
+        container_path: /var/lib/redis
+
+jobs:
+  - id: qt_compile_1
+    image: {image_tag}
+    cpu_slots: 4
+    memory_slots: 4
+    env_vars:
+      SCCACHE_REDIS: "redis://redis:6379/0"
+    command: ["bash", "/src/compile_qt.sh"]
+    depends_on: []
+    artifacts:
+      - source_glob: "*.js"
+        destination_subdir: wasm_build/compile_1
+      - source_glob: "*.wasm"
+        destination_subdir: wasm_build/compile_1
+      - source_glob: "sccache_stats.json"
+        destination_subdir: stats/compile_1
+
+  - id: qt_compile_2
+    image: {image_tag}
+    cpu_slots: 4
+    memory_slots: 4
+    env_vars:
+      SCCACHE_REDIS: "redis://redis:6379/0"
+    command: ["bash", "/src/compile_qt.sh"]
+    depends_on: ["qt_compile_1"]
+    artifacts:
+      - source_glob: "*.js"
+        destination_subdir: wasm_build/compile_2
+      - source_glob: "*.wasm"
+        destination_subdir: wasm_build/compile_2
+      - source_glob: "sccache_stats.json"
+        destination_subdir: stats/compile_2

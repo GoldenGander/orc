@@ -28,6 +28,7 @@ from orchestrator.scheduler import ResourceScheduler
 from orchestrator.volume_prep import prepare_volumes
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+QTWASM_SAMPLE_DIR = Path(__file__).parent.parent / "QtWasm" / "sample"
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +128,8 @@ def _run_plan(
         for path in source_fixture_dir.iterdir():
             if path.is_file():
                 shutil.copy2(path, source_dir / path.name)
+            elif path.is_dir():
+                shutil.copytree(path, source_dir / path.name)
 
     prepare_volumes(plan, source_dir, container_output_root)
 
@@ -438,6 +441,97 @@ jobs:
             assert restore_a["cache_misses"]["counts"].get("C/C++", 0) == 0
             assert restore_b["cache_hits"]["counts"]["C/C++"] >= 1
             assert restore_b["cache_misses"]["counts"].get("C/C++", 0) == 0
+
+        finally:
+            _remove_test_image(image_tag)
+
+    def test_qt_wasm_sccache_redis_cache_hit(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Two sequential Qt WASM compiles verify sccache Redis cache hits.
+
+        Verifies:
+        - Both compile jobs succeed (second depends on first).
+        - Real Qt WASM compilation of the sample project from QtWasm/sample.
+        - sccache with Redis backend: first compile produces cache misses.
+        - Second compile produces cache hits from Redis.
+        - WASM artifacts are valid (magic header, non-trivial size).
+        """
+        image_tag = f"build-orch-qt-wasm-test:{uuid4().hex[:12]}"
+        _build_test_image(FIXTURES_DIR / "qt_wasm_compile", image_tag)
+
+        try:
+            fixture_dir = FIXTURES_DIR / "qt_wasm_orchestration"
+            redis_host_path = (tmp_path / "redis-cache").resolve()
+            redis_host_path.mkdir()
+
+            # Merge compile script + real Qt sample project into a single source tree
+            combined_source = tmp_path / "combined_source"
+            combined_source.mkdir()
+            shutil.copy2(fixture_dir / "compile_qt.sh", combined_source / "compile_qt.sh")
+            shutil.copytree(QTWASM_SAMPLE_DIR, combined_source / "sample")
+
+            plan_path = tmp_path / "plan.yaml"
+            _render_fixture_template(
+                fixture_dir / "plan.yaml.tmpl",
+                plan_path,
+                network=f"orch-qt-{uuid4().hex[:10]}",
+                image_tag=image_tag,
+                redis_host_path=redis_host_path.as_posix(),
+            )
+
+            result, reporter, output_dir = _run_plan(
+                plan_path, tmp_path, source_fixture_dir=combined_source,
+            )
+
+            # ---- overall success ----
+            assert result.success is True
+            all_job_ids = {"qt_compile_1", "qt_compile_2"}
+            assert {r.job_id for r in result.job_results} == all_job_ids
+            assert all(r.success for r in result.job_results)
+
+            # ---- reporter events ----
+            assert set(reporter.started) == all_job_ids
+            assert {jid for jid, _ in reporter.completed} == all_job_ids
+            assert all(ok for _, ok in reporter.completed)
+
+            # ---- WASM artifact validity ----
+            for label in ["compile_1", "compile_2"]:
+                js_file = output_dir / "wasm_build" / label / "helloworld.js"
+                wasm_file = output_dir / "wasm_build" / label / "helloworld.wasm"
+
+                assert js_file.exists(), f"Missing JS artifact for {label}"
+                assert wasm_file.exists(), f"Missing WASM artifact for {label}"
+                wasm_bytes = wasm_file.read_bytes()
+                assert wasm_bytes[:4] == b"\x00asm", f"Invalid WASM header for {label}"
+                assert len(wasm_bytes) > 1024, f"WASM file too small for {label}"
+
+            # ---- sccache stats: first compile misses, second compile hits ----
+            stats_1 = json.loads(
+                (output_dir / "stats" / "compile_1" / "sccache_stats.json").read_text()
+            )
+            stats_2 = json.loads(
+                (output_dir / "stats" / "compile_2" / "sccache_stats.json").read_text()
+            )
+
+            misses_1 = sum(
+                stats_1.get("stats", stats_1)
+                .get("cache_misses", {})
+                .get("counts", {})
+                .values()
+            )
+            hits_2 = sum(
+                stats_2.get("stats", stats_2)
+                .get("cache_hits", {})
+                .get("counts", {})
+                .values()
+            )
+            assert misses_1 > 0, "First compile should have cache misses"
+            assert hits_2 > 0, "Second compile should have cache hits from Redis"
+            assert hits_2 >= misses_1, (
+                f"Cache hits ({hits_2}) should cover first compile misses ({misses_1})"
+            )
 
         finally:
             _remove_test_image(image_tag)
