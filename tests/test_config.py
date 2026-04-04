@@ -181,24 +181,6 @@ class TestValidConfig:
         assert plan.resources[0].artifacts[0].source_glob == "*.rdb"
         assert plan.resources[0].artifacts[0].destination_subdir == "resource-state"
 
-    def test_external_resource_is_parsed(self, loader: YamlConfigLoader, tmp_path: Path) -> None:
-        path = _write_yaml(tmp_path, """\
-            resources:
-              - id: shared_redis
-                kind: cache
-                lifetime: external
-                driver: external
-                endpoint: redis://cache.internal:6379
-            jobs:
-              - id: build
-                image: img:1
-        """)
-        plan = loader.load(path)
-
-        assert len(plan.resources) == 1
-        assert plan.resources[0].endpoint == "redis://cache.internal:6379"
-        assert plan.resources[0].image is None
-
     def test_artifact_destination_subdir_defaults_to_empty(
         self, loader: YamlConfigLoader, tmp_path: Path
     ) -> None:

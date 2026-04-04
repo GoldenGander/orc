@@ -20,12 +20,10 @@ class JobStatus(Enum):
 
 class ResourceLifetime(Enum):
     MANAGED = "managed"
-    EXTERNAL = "external"
 
 
 class ResourceDriver(Enum):
     DOCKER_CONTAINER = "docker_container"
-    EXTERNAL = "external"
 
 
 @dataclass(frozen=True)
@@ -67,9 +65,8 @@ class ArtifactSpec:
 class ResourceSpec:
     """Pipeline-wide shared resource configuration.
 
-    Resources are shared infrastructure that jobs may depend on. A resource may
-    be managed by the orchestrator for the lifetime of the plan, or it may be
-    an external dependency the plan simply references.
+    Resources are shared infrastructure started and managed by the orchestrator
+    for the lifetime of the plan.
     """
 
     id: str
@@ -77,7 +74,6 @@ class ResourceSpec:
     lifetime: ResourceLifetime = ResourceLifetime.MANAGED
     driver: ResourceDriver = ResourceDriver.DOCKER_CONTAINER
     image: str | None = None
-    endpoint: str | None = None
     aliases: list[str] = field(default_factory=list)
     command: list[str] | None = None
     artifacts: list[ArtifactSpec] = field(default_factory=list)

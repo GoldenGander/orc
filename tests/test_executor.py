@@ -523,3 +523,4 @@ class TestPipelineLifecycle:
             assert len(call) == 3
             assert call[2].startswith("orch_resource_")
         assert ["docker", "network", "rm", "build-net"] in calls
+

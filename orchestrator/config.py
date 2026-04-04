@@ -64,7 +64,6 @@ class RawResourceConfig:
     lifetime: str = ResourceLifetime.MANAGED.value
     driver: str = ResourceDriver.DOCKER_CONTAINER.value
     image: str | None = None
-    endpoint: str | None = None
     aliases: list[str] = field(default_factory=list)
     command: list[str] | None = None
     artifacts: list[RawArtifactConfig] = field(default_factory=list)
@@ -274,23 +273,6 @@ class YamlConfigLoader(IConfigLoader):
                     raise ConfigurationError(
                         f"Resource '{resource.id}': image must not be empty for managed docker_container resources"
                     )
-            if resource.driver == ResourceDriver.EXTERNAL.value:
-                if resource.lifetime != ResourceLifetime.EXTERNAL.value:
-                    raise ConfigurationError(
-                        f"Resource '{resource.id}': external resources must use lifetime 'external'"
-                    )
-                if not resource.endpoint:
-                    raise ConfigurationError(
-                        f"Resource '{resource.id}': endpoint must not be empty for external resources"
-                    )
-                if resource.image:
-                    raise ConfigurationError(
-                        f"Resource '{resource.id}': image is not supported for external resources"
-                    )
-                if resource.command is not None:
-                    raise ConfigurationError(
-                        f"Resource '{resource.id}': command is not supported for external resources"
-                    )
             for index, artifact in enumerate(resource.artifacts):
                 _validate_artifact_destination_subdir(
                     artifact.destination_subdir,
@@ -349,7 +331,6 @@ class YamlConfigLoader(IConfigLoader):
                     lifetime=ResourceLifetime(resource.lifetime),
                     driver=ResourceDriver(resource.driver),
                     image=resource.image,
-                    endpoint=resource.endpoint,
                     aliases=resource.aliases if resource.aliases else [resource.id],
                     command=resource.command,
                     artifacts=[
@@ -519,10 +500,6 @@ def _parse_resources(raw_resources: Any) -> list[RawResourceConfig]:
         image = raw_resource.get("image")
         if image is not None and not isinstance(image, str):
             raise ConfigurationError(f"{prefix}.image: expected a string or null")
-        endpoint = raw_resource.get("endpoint")
-        if endpoint is not None and not isinstance(endpoint, str):
-            raise ConfigurationError(f"{prefix}.endpoint: expected a string or null")
-
         aliases = raw_resource.get("aliases", [])
         if not isinstance(aliases, list) or not all(isinstance(a, str) for a in aliases):
             raise ConfigurationError(f"{prefix}.aliases: expected a list of strings")
@@ -543,7 +520,6 @@ def _parse_resources(raw_resources: Any) -> list[RawResourceConfig]:
                 lifetime=lifetime,
                 driver=driver,
                 image=image,
-                endpoint=endpoint,
                 aliases=aliases,
                 command=command,
                 artifacts=_parse_artifacts(

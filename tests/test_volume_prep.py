@@ -39,20 +39,13 @@ def _job(jid: str, volumes: list[VolumeMount] | None = None) -> JobSpec:
 def _resource(
     resource_id: str,
     volumes: list[VolumeMount] | None = None,
-    *,
-    lifetime: ResourceLifetime = ResourceLifetime.MANAGED,
 ) -> ResourceSpec:
     return ResourceSpec(
         id=resource_id,
         kind="cache",
-        lifetime=lifetime,
-        driver=(
-            ResourceDriver.DOCKER_CONTAINER
-            if lifetime == ResourceLifetime.MANAGED
-            else ResourceDriver.EXTERNAL
-        ),
-        image=(f"registry/{resource_id}:latest" if lifetime == ResourceLifetime.MANAGED else None),
-        endpoint=("redis://cache.internal:6379" if lifetime == ResourceLifetime.EXTERNAL else None),
+        lifetime=ResourceLifetime.MANAGED,
+        driver=ResourceDriver.DOCKER_CONTAINER,
+        image=f"registry/{resource_id}:latest",
         artifacts=[ArtifactSpec(source_glob="*.txt", destination_subdir=resource_id)],
         volumes=list(volumes or []),
     )
@@ -171,16 +164,6 @@ class TestPrepareVolumes:
 
         assert (out_root / RESOURCE_OUTPUT_DIRNAME / "redis").is_dir()
         assert (out_root / RESOURCE_OUTPUT_DIRNAME / "queue").is_dir()
-
-    def test_external_resources_do_not_get_managed_output_mounts(self, tmp_path: Path) -> None:
-        source = tmp_path / "src"
-        source.mkdir()
-        plan = _plan([], resources=[_resource("redis", lifetime=ResourceLifetime.EXTERNAL)])
-
-        prepare_volumes(plan, source, tmp_path / "out")
-
-        output_vols = [v for v in plan.resources[0].volumes if v.container_path == CONTAINER_OUTPUT_PATH]
-        assert output_vols == []
 
     @pytest.mark.parametrize("job_id", ["../escape", "a/b", "job name", "con"])
     def test_rejects_unsafe_job_ids(self, tmp_path: Path, job_id: str) -> None:
