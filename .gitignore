@@ -11,4 +11,11 @@ wheels/
 
 /QtWasm
 
+.ignore
+
+*.md
+!README.md
+!agents.md
+!AGENTS.md
+
 .claude/
