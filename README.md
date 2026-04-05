@@ -421,26 +421,83 @@ The codebase is organized with test-driven development practices:
 
 ## Azure DevOps Integration
 
-This tool is designed to be invoked as a pipeline step:
+This tool is designed to be invoked as a pipeline step. An annotated example is also available at [`azure-pipelines.example.yml`](azure-pipelines.example.yml) in the repository root.
+
+### Basic Pipeline
+
+The minimal setup: validate the config, run the build, then publish artifacts.
 
 ```yaml
+# azure-pipelines.yml
 trigger:
   - main
 
-jobs:
-  - job: BuildJob
-    pool:
-      vmImage: 'ubuntu-latest'
-    steps:
-      - checkout: self
-      - task: UsePythonVersion@0
-        inputs:
-          versionSpec: '3.12'
-      - script: |
-          pip install uv
-          uv run python main.py build-config.yaml --source-dir $(Build.SourcesDirectory) --output-dir $(Build.ArtifactStagingDirectory)
-        displayName: 'Run Orchestrated Build'
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  - checkout: self
+    displayName: Checkout source
+
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '3.12'
+    displayName: Use Python 3.12
+
+  - script: |
+      pip install uv
+      uv sync --frozen
+    displayName: Install orchestrator
+
+  - script: |
+      uv run python main.py build-config.yaml \
+        --source-dir $(Build.SourcesDirectory) \
+        --dry-run
+    displayName: Validate build config
+
+  - script: |
+      uv run python main.py build-config.yaml \
+        --source-dir $(Build.SourcesDirectory) \
+        --output-dir $(Build.ArtifactStagingDirectory) \
+        --keep-logs
+    displayName: Run orchestrated build
+
+  - task: PublishBuildArtifacts@1
+    condition: always()
+    inputs:
+      pathToPublish: $(Build.ArtifactStagingDirectory)
+      artifactName: build-outputs
+    displayName: Publish artifacts
 ```
+
+### With Real-Time HTTP Monitoring
+
+Pass `--port` to start the HTTP event server and poll job status from another step or external system while the build runs.
+
+```yaml
+  - script: |
+      uv run python main.py build-config.yaml \
+        --source-dir $(Build.SourcesDirectory) \
+        --output-dir $(Build.ArtifactStagingDirectory) \
+        --keep-logs \
+        --port 9000
+    displayName: Run orchestrated build (with monitoring)
+
+  # From another terminal / script during the build:
+  # curl http://127.0.0.1:9000/status
+  # curl 'http://127.0.0.1:9000/events?cursor=0'
+```
+
+### CLI Reference
+
+| Flag | Default | Description |
+|---|---|---|
+| `config` | (required) | Path to the YAML build plan |
+| `--source-dir` | (required) | Checked-out source tree; mounted read-only at `/src` in every job |
+| `--output-dir` | `artifacts` | Directory where artifacts and logs are written |
+| `--dry-run` | off | Validate config without executing any containers |
+| `--port PORT` | off | Start the HTTP event server on `127.0.0.1:PORT` |
+| `--keep-logs` | off | Copy job logs to `--output-dir/logs/` on success (always copied on failure) |
 
 ## License
 

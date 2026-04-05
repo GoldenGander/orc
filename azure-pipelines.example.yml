@@ -1,0 +1,86 @@
+# azure-pipelines.example.yml
+#
+# Example Azure DevOps pipeline that uses the build orchestrator.
+# Copy or adapt this file as your pipeline entrypoint.
+#
+# The orchestrator reads a build plan (build-config.yaml) and runs each job
+# inside an isolated Docker container on the pipeline agent. Artifacts are
+# written to $(Build.ArtifactStagingDirectory) and published at the end.
+
+trigger:
+  - main
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  # ── Checkout ────────────────────────────────────────────────────────────────
+  - checkout: self
+    displayName: Checkout source
+
+  # ── Python setup ────────────────────────────────────────────────────────────
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '3.12'
+    displayName: Use Python 3.12
+
+  # ── Install orchestrator ─────────────────────────────────────────────────────
+  # uv sync --frozen installs exactly the versions pinned in uv.lock.
+  - script: |
+      pip install uv
+      uv sync --frozen
+    displayName: Install orchestrator dependencies
+
+  # ── Validate build config ────────────────────────────────────────────────────
+  # --dry-run parses and validates the build plan without running any containers.
+  # Fail early on config errors before spending agent time on real work.
+  - script: |
+      uv run python main.py build-config.yaml \
+        --source-dir "$(Build.SourcesDirectory)" \
+        --dry-run
+    displayName: Validate build config
+
+  # ── Run orchestrated build ───────────────────────────────────────────────────
+  # --keep-logs copies per-job logs into the artifact directory after a
+  # successful run (they are always preserved on failure).
+  #
+  # Remove --keep-logs if you only want logs on failure.
+  # Add --port 9000 to also start the HTTP monitoring server (see below).
+  - script: |
+      uv run python main.py build-config.yaml \
+        --source-dir "$(Build.SourcesDirectory)" \
+        --output-dir "$(Build.ArtifactStagingDirectory)" \
+        --keep-logs
+    displayName: Run orchestrated build
+
+  # ── Publish artifacts ────────────────────────────────────────────────────────
+  # condition: always() ensures artifacts (including failure logs) are uploaded
+  # even when the build step exits non-zero.
+  - task: PublishBuildArtifacts@1
+    condition: always()
+    inputs:
+      pathToPublish: $(Build.ArtifactStagingDirectory)
+      artifactName: build-outputs
+    displayName: Publish artifacts
+
+# ── HTTP monitoring (optional) ───────────────────────────────────────────────
+#
+# Pass --port 9000 to the orchestrator to start an HTTP event server that
+# exposes real-time job status while the build runs. Useful for dashboards,
+# external polling scripts, or async Azure DevOps integrations.
+#
+# Endpoints:
+#   GET /status               → snapshot of current job states
+#   GET /events?cursor=<n>    → long-poll for new events since cursor
+#
+# Example polling loop (run from a parallel job or a separate script):
+#
+#   cursor=0
+#   while true; do
+#     response=$(curl -sf "http://127.0.0.1:9000/events?cursor=$cursor")
+#     echo "$response" | jq -c '.events[]'
+#     cursor=$(echo "$response" | jq '.cursor')
+#     done=$(echo "$response" | jq '.done')
+#     events=$(echo "$response" | jq '.events | length')
+#     [ "$done" = "true" ] && [ "$events" = "0" ] && break
+#   done
