@@ -9,6 +9,8 @@ Requires Docker to be available on the host. Tests are marked with
 from __future__ import annotations
 
 import json
+import logging
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -16,6 +18,8 @@ from typing import override
 from uuid import uuid4
 
 import pytest
+
+logger = logging.getLogger(__name__)
 
 from orchestrator.artifact_store import ArtifactStore
 from orchestrator.config import YamlConfigLoader
@@ -29,6 +33,8 @@ from orchestrator.volume_prep import prepare_volumes
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 QTWASM_SAMPLE_DIR = Path(__file__).parent.parent / "QtWasm" / "sample"
+QT_WASM_SCCACHE_DEFAULT_REPO = "https://github.com/GoldenGander/wasm-sccache.git"
+QT_WASM_SCCACHE_DEFAULT_REV = "a44a8512228a7e49d3e9b119500c42d1fb655c55"
 
 
 # ---------------------------------------------------------------------------
@@ -86,9 +92,18 @@ requires_docker = pytest.mark.skipif(
 integration = pytest.mark.integration
 
 
-def _build_test_image(context_dir: Path, tag: str) -> None:
+def _build_test_image(
+    context_dir: Path,
+    tag: str,
+    *,
+    build_args: dict[str, str] | None = None,
+) -> None:
+    command = ["docker", "build", "-t", tag]
+    for key, value in (build_args or {}).items():
+        command.extend(["--build-arg", f"{key}={value}"])
+    command.append(str(context_dir))
     subprocess.run(
-        ["docker", "build", "-t", tag, str(context_dir)],
+        command,
         check=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -107,6 +122,15 @@ def _remove_test_image(tag: str) -> None:
 def _render_fixture_template(template_path: Path, destination: Path, **values: str) -> Path:
     destination.write_text(template_path.read_text(encoding="utf-8").format(**values), encoding="utf-8")
     return destination
+
+
+def _qt_wasm_sccache_build_args() -> dict[str, str]:
+    repo = os.environ.get("QT_WASM_SCCACHE_REPO", QT_WASM_SCCACHE_DEFAULT_REPO)
+    rev = os.environ.get("QT_WASM_SCCACHE_REV", QT_WASM_SCCACHE_DEFAULT_REV)
+    return {
+        "SCCACHE_REPO": repo,
+        "SCCACHE_REV": rev,
+    }
 
 
 def _run_plan(
@@ -449,17 +473,26 @@ jobs:
         self,
         tmp_path: Path,
     ) -> None:
-        """Two sequential Qt WASM compiles verify sccache Redis cache hits.
+        """Two sequential Qt WASM compiles verify sccache Redis cache hits and binary reproducibility.
 
         Verifies:
         - Both compile jobs succeed (second depends on first).
         - Real Qt WASM compilation of the sample project from QtWasm/sample.
         - sccache with Redis backend: first compile produces cache misses.
-        - Second compile produces cache hits from Redis.
+        - Second compile produces cache hits with zero misses from Redis.
         - WASM artifacts are valid (magic header, non-trivial size).
+        - Both compiles produce bit-for-bit identical .wasm and .js artifacts.
+
+        Optional env vars:
+        - QT_WASM_SCCACHE_REPO: fork URL used for the Qt image build.
+        - QT_WASM_SCCACHE_REV: pinned full commit SHA from that fork.
         """
         image_tag = f"build-orch-qt-wasm-test:{uuid4().hex[:12]}"
-        _build_test_image(FIXTURES_DIR / "qt_wasm_compile", image_tag)
+        _build_test_image(
+            FIXTURES_DIR / "qt_wasm_compile",
+            image_tag,
+            build_args=_qt_wasm_sccache_build_args(),
+        )
 
         try:
             fixture_dir = FIXTURES_DIR / "qt_wasm_orchestration"
@@ -507,6 +540,25 @@ jobs:
                 assert wasm_bytes[:4] == b"\x00asm", f"Invalid WASM header for {label}"
                 assert len(wasm_bytes) > 1024, f"WASM file too small for {label}"
 
+            # ---- compiler invocation breakdown (compile_1 only) ----
+            ninja_log = (output_dir / "stats" / "compile_1" / "ninja_verbose.log").read_text(errors="replace")
+            shim_log = (output_dir / "stats" / "compile_1" / "compiler_shim.log").read_text(errors="replace")
+            lines = ninja_log.splitlines()
+            logger.info("ninja_verbose.log: %d total lines", len(lines))
+            # Log every line that looks like a compiler invocation (contains a source file extension)
+            invoke_lines = [l for l in lines if any(ext in l for ext in (".cpp", ".c ", ".cxx"))]
+            logger.info("lines referencing source files: %d", len(invoke_lines))
+            for line in invoke_lines[:20]:  # cap at 20 to avoid flooding
+                logger.info("  %s", line[:2000])
+            assert "em++ " in shim_log or "emcc " in shim_log
+
+            # Verify wasm-opt was invoked and shimmed in compile_1
+            wasm_opt_invocations = [l for l in shim_log.splitlines() if l.startswith("wasm-opt")]
+            logger.info("wasm-opt invocations in compile_1: %d", len(wasm_opt_invocations))
+            assert len(wasm_opt_invocations) > 0, "wasm-opt should be called during compilation"
+            for inv in wasm_opt_invocations[:5]:  # Log first 5 invocations
+                logger.info("  %s", inv[:200])
+
             # ---- sccache stats: first compile misses, second compile hits ----
             stats_1 = json.loads(
                 (output_dir / "stats" / "compile_1" / "sccache_stats.json").read_text()
@@ -527,11 +579,71 @@ jobs:
                 .get("counts", {})
                 .values()
             )
+            misses_2 = sum(
+                stats_2.get("stats", stats_2)
+                .get("cache_misses", {})
+                .get("counts", {})
+                .values()
+            )
+            unsupported_1 = sum(
+                stats_1.get("stats", stats_1)
+                .get("cache_unsupported", {})
+                .get("counts", {})
+                .values()
+            )
+            unsupported_2 = sum(
+                stats_2.get("stats", stats_2)
+                .get("cache_unsupported", {})
+                .get("counts", {})
+                .values()
+            )
             assert misses_1 > 0, "First compile should have cache misses"
             assert hits_2 > 0, "Second compile should have cache hits from Redis"
             assert hits_2 >= misses_1, (
                 f"Cache hits ({hits_2}) should cover first compile misses ({misses_1})"
             )
+            durations = {r.job_id: r.duration_seconds for r in result.job_results}
+            logger.info(
+                "sccache stats — compile_1: misses=%d unsupported=%d | compile_2: hits=%d misses=%d unsupported=%d",
+                misses_1, unsupported_1, hits_2, misses_2, unsupported_2,
+            )
+            logger.info(
+                "job durations — qt_compile_1: %.1fs | qt_compile_2: %.1fs",
+                durations.get("qt_compile_1", 0),
+                durations.get("qt_compile_2", 0),
+            )
+
+            assert misses_2 == 0, (
+                f"Second compile should have zero cache misses (got {misses_2}); "
+                f"non-deterministic inputs may be poisoning cache keys"
+            )
+
+            # ---- wasm-opt caching verification ----
+            # Verify both runs invoked wasm-opt through the shim
+            shim_log_2 = (output_dir / "stats" / "compile_2" / "compiler_shim.log").read_text(errors="replace")
+            wasm_opt_invocations_2 = [l for l in shim_log_2.splitlines() if l.startswith("wasm-opt")]
+            logger.info("wasm-opt invocations in compile_2: %d", len(wasm_opt_invocations_2))
+            assert len(wasm_opt_invocations_2) > 0, (
+                "wasm-opt should be invoked in second compile and shimmed for caching"
+            )
+            # Both runs should have similar number of wasm-opt invocations
+            assert len(wasm_opt_invocations_2) == len(wasm_opt_invocations), (
+                f"wasm-opt invocation counts should match across runs; "
+                f"compile_1={len(wasm_opt_invocations)} compile_2={len(wasm_opt_invocations_2)}"
+            )
+
+            # ---- binary reproducibility ----
+            for artifact in ["helloworld.wasm", "helloworld.js"]:
+                bytes_1 = (output_dir / "wasm_build" / "compile_1" / artifact).read_bytes()
+                bytes_2 = (output_dir / "wasm_build" / "compile_2" / artifact).read_bytes()
+                logger.info(
+                    "%s sizes — compile_1: %d bytes | compile_2: %d bytes | identical: %s",
+                    artifact, len(bytes_1), len(bytes_2), bytes_1 == bytes_2,
+                )
+                assert bytes_1 == bytes_2, (
+                    f"{artifact} is not bit-for-bit reproducible across compiles; "
+                    f"compile_1={len(bytes_1)}B compile_2={len(bytes_2)}B"
+                )
 
         finally:
             _remove_test_image(image_tag)

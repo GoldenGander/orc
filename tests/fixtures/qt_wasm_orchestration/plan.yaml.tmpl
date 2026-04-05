@@ -42,6 +42,10 @@ jobs:
         destination_subdir: wasm_build/compile_1
       - source_glob: "sccache_stats.json"
         destination_subdir: stats/compile_1
+      - source_glob: "compiler_shim.log"
+        destination_subdir: stats/compile_1
+      - source_glob: "ninja_verbose.log"
+        destination_subdir: stats/compile_1
 
   - id: qt_compile_2
     image: {image_tag}
@@ -57,4 +61,8 @@ jobs:
       - source_glob: "*.wasm"
         destination_subdir: wasm_build/compile_2
       - source_glob: "sccache_stats.json"
+        destination_subdir: stats/compile_2
+      - source_glob: "compiler_shim.log"
+        destination_subdir: stats/compile_2
+      - source_glob: "ninja_verbose.log"
         destination_subdir: stats/compile_2
