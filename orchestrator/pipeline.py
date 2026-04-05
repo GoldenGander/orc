@@ -15,6 +15,7 @@ class AzureCliArgs:
     output_dir: Path
     source_dir: Path
     dry_run: bool = False
+    port: int | None = None
 
 
 class IPipelineReporter(ABC):

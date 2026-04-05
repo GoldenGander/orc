@@ -38,6 +38,7 @@ def test_executor_shuts_down_when_engine_raises(tmp_path) -> None:
         output_dir=tmp_path / "output",
         source_dir=tmp_path / "source",
         dry_run=False,
+        port=None,
     )
     executors: list[_FakeExecutor] = []
 
