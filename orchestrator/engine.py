@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from concurrent.futures import Future, wait, FIRST_COMPLETED
 from pathlib import Path
 
@@ -68,6 +69,7 @@ class Engine:
         in_flight: dict[Future[JobResult], str] = {}
         cancelling = False
         artifact_failure: ArtifactError | None = None
+        last_status_report_time = time.monotonic()
 
         try:
             self._executor.start(plan)
@@ -88,6 +90,12 @@ class Engine:
                         logger.info("Submitting job %s", job_id)
                         future = self._executor.submit(job)
                         in_flight[future] = job_id
+
+                # ---- resource status reporting ----
+                now = time.monotonic()
+                if now - last_status_report_time >= plan.resource_status_interval_seconds:
+                    self._reporter.report_resource_status(plan.resources)
+                    last_status_report_time = now
 
                 # ---- stall detection ----
                 # No futures running and not all settled → remaining jobs are

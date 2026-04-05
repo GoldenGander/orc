@@ -157,6 +157,7 @@ class FakeReporter(IPipelineReporter):
         self.started: list[str] = []
         self.completed: list[tuple[str, bool]] = []
         self.final_result: OrchestratorResult | None = None
+        self.resource_status_reports: list[list] = []
 
     @override
     def report_job_started(self, job_id: str) -> None:
@@ -169,6 +170,10 @@ class FakeReporter(IPipelineReporter):
     @override
     def report_result(self, result: OrchestratorResult) -> None:
         self.final_result = result
+
+    @override
+    def report_resource_status(self, resources: object) -> None:
+        self.resource_status_reports.append(list(resources) if resources else [])
 
 
 # ---------------------------------------------------------------------------

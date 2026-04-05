@@ -85,6 +85,7 @@ class RawPipelineConfig:
     job_timeout_seconds: int | None = 3600
     resource_network: str | None = None
     resources: list[RawResourceConfig] = field(default_factory=list)
+    resource_status_interval_seconds: int = 5
 
 
 class IConfigLoader(ABC):
@@ -186,6 +187,9 @@ class YamlConfigLoader(IConfigLoader):
             ),
             resources=_parse_resources(
                 data.get("resources", data.get("services", [])),
+            ),
+            resource_status_interval_seconds=_expect_int(
+                data, "resource_status_interval_seconds", default=5
             ),
         )
 
@@ -435,6 +439,7 @@ class YamlConfigLoader(IConfigLoader):
                 )
                 for resource in raw.resources
             ],
+            resource_status_interval_seconds=raw.resource_status_interval_seconds,
         )
 
 

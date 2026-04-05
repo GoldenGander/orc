@@ -15,7 +15,6 @@ from orchestrator.logger import FileJobLogger
 from orchestrator.models import BuildPlan, OrchestratorResult
 from orchestrator.pipeline import AzureCliArgs
 from orchestrator.scheduler import ResourceScheduler
-from orchestrator.volume_prep import prepare_volumes
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +54,9 @@ class _StdoutReporter:
         logger.info("##vso[task.logdetail] Job %s: %s", status, job_id)
 
     def report_result(self, result: object) -> None:
+        pass
+
+    def report_resource_status(self, resources: object) -> None:
         pass
 
 
@@ -108,21 +110,29 @@ def main() -> None:
         container_output_root = tmp / "outputs"
         staging_dir = tmp / "staging"
 
-        prepare_volumes(plan, args.source_dir, container_output_root)
-
         artifact_store = ArtifactStore(staging_dir, container_output_root)
         scheduler = ResourceScheduler(plan)
 
         if args.port is not None:
             from orchestrator.server.event_bus import EventBus
             from orchestrator.server.http_server import OrchestratorHTTPServer
+            from orchestrator.server.metrics import HostMetricsSampler
             from orchestrator.server.reporter import CompositeReporter, EventBusReporter
             from orchestrator.server.tee_logger import EventBusJobLogger
 
             bus = EventBus()
+            sampler = HostMetricsSampler(bus)
             job_logger = EventBusJobLogger(log_dir, bus)
-            executor = DockerExecutor(logger=job_logger, max_workers=plan.max_parallel)
-            reporter = CompositeReporter(_StdoutReporter(), EventBusReporter(bus))
+            executor = DockerExecutor(
+                logger=job_logger,
+                source_dir=args.source_dir,
+                container_output_root=container_output_root,
+                max_workers=plan.max_parallel,
+            )
+            reporter = CompositeReporter(
+                _StdoutReporter(),
+                EventBusReporter(bus, plan=plan, sampler=sampler),
+            )
 
             engine = Engine(
                 scheduler=scheduler,
@@ -138,11 +148,13 @@ def main() -> None:
 
             def _run_engine() -> None:
                 try:
+                    sampler.start()
                     engine_result.append(engine.run(plan))
                 except BaseException as exc:  # noqa: BLE001
                     engine_exc.append(exc)
                     bus.close()
                 finally:
+                    sampler.stop()
                     executor.shutdown()
 
             engine_thread = threading.Thread(target=_run_engine, daemon=False, name="engine")
@@ -156,7 +168,12 @@ def main() -> None:
 
         else:
             job_logger = FileJobLogger(log_dir)
-            executor = DockerExecutor(logger=job_logger, max_workers=plan.max_parallel)
+            executor = DockerExecutor(
+                logger=job_logger,
+                source_dir=args.source_dir,
+                container_output_root=container_output_root,
+                max_workers=plan.max_parallel,
+            )
             reporter = _StdoutReporter()
 
             engine = Engine(

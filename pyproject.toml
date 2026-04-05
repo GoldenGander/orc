@@ -5,6 +5,7 @@ description = "Build orchestration system for Azure DevOps pipelines"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "psutil>=6.0",
     "pyyaml>=6.0",
 ]
 

@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 
-from orchestrator.models import OrchestratorResult
+from orchestrator.models import OrchestratorResult, ResourceSpec
 
 
 @dataclass
@@ -16,6 +16,7 @@ class AzureCliArgs:
     source_dir: Path
     dry_run: bool = False
     port: int | None = None
+    keep_logs: bool = False
 
 
 class IPipelineReporter(ABC):
@@ -38,4 +39,9 @@ class IPipelineReporter(ABC):
     @abstractmethod
     def report_result(self, result: OrchestratorResult) -> None:
         """Emit the final orchestration outcome and set the pipeline task status."""
+        ...
+
+    @abstractmethod
+    def report_resource_status(self, resources: list[ResourceSpec]) -> None:
+        """Report the status of all managed resources during execution."""
         ...

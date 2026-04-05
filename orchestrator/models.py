@@ -126,6 +126,7 @@ class BuildPlan:
     job_timeout_seconds: int | None = 3600
     resource_network: str | None = None
     resources: list[ResourceSpec] = field(default_factory=list)
+    resource_status_interval_seconds: int = 5
 
 
 @dataclass(frozen=True)
