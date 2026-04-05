@@ -195,3 +195,55 @@ def test_snapshot_done_after_close() -> None:
     bus = EventBus()
     bus.close()
     assert bus.snapshot()["done"] is True
+
+
+# ---------------------------------------------------------------------------
+# Per-job bus registry
+# ---------------------------------------------------------------------------
+
+
+def test_job_bus_creates_new_bus() -> None:
+    bus = EventBus()
+    job_bus = bus.job_bus("compile")
+    assert isinstance(job_bus, EventBus)
+
+
+def test_job_bus_is_idempotent() -> None:
+    bus = EventBus()
+    b1 = bus.job_bus("compile")
+    b2 = bus.job_bus("compile")
+    assert b1 is b2
+
+
+def test_get_job_bus_returns_none_before_creation() -> None:
+    bus = EventBus()
+    assert bus.get_job_bus("compile") is None
+
+
+def test_get_job_bus_returns_bus_after_creation() -> None:
+    bus = EventBus()
+    bus.job_bus("compile")
+    assert bus.get_job_bus("compile") is not None
+
+
+def test_job_ids_empty_initially() -> None:
+    bus = EventBus()
+    assert bus.job_ids() == []
+
+
+def test_job_ids_reflects_registered_jobs() -> None:
+    bus = EventBus()
+    bus.job_bus("a")
+    bus.job_bus("b")
+    assert sorted(bus.job_ids()) == ["a", "b"]
+
+
+def test_per_job_bus_is_independent_from_main_bus() -> None:
+    bus = EventBus()
+    job_bus = bus.job_bus("compile")
+    job_bus.push({"type": "log_line", "line": "hello"})
+
+    # log_line should NOT appear on the main bus
+    assert len(bus._buffer) == 0
+    # but IS in the job bus
+    assert len(job_bus._buffer) == 1

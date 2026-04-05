@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import json
 import threading
 import time
-from datetime import datetime, timezone
 
 
 class EventBus:
@@ -17,6 +15,10 @@ class EventBus:
 
     close() marks the bus as done; events_since() returns immediately once
     the buffer is drained past the caller's cursor.
+
+    Per-job buses are nested inside the pipeline bus.  Call job_bus(job_id)
+    to get (creating if needed) a dedicated EventBus for a single job's log
+    stream.  This keeps log_line events off the main pipeline stream.
     """
 
     def __init__(self) -> None:
@@ -26,6 +28,7 @@ class EventBus:
         self._done = False
         self._job_states: dict[str, str] = {}  # job_id -> "running"|"success"|"failed"
         self._start_time = time.monotonic()
+        self._job_buses: dict[str, "EventBus"] = {}
 
     # ------------------------------------------------------------------
     # Producer side
@@ -101,3 +104,29 @@ class EventBus:
                 "elapsed_seconds": round(time.monotonic() - self._start_time, 1),
                 "jobs": dict(self._job_states),
             }
+
+    # ------------------------------------------------------------------
+    # Per-job bus registry
+    # ------------------------------------------------------------------
+
+    def job_bus(self, job_id: str) -> "EventBus":
+        """Return the per-job EventBus for *job_id*, creating it if needed.
+
+        Per-job buses carry log_line events only and are served on the
+        /jobs/<id>/events endpoint.  The main pipeline bus stays free of
+        noisy log output.
+        """
+        with self._lock:
+            if job_id not in self._job_buses:
+                self._job_buses[job_id] = EventBus()
+            return self._job_buses[job_id]
+
+    def get_job_bus(self, job_id: str) -> "EventBus | None":
+        """Return the per-job bus if it has been created, else None."""
+        with self._lock:
+            return self._job_buses.get(job_id)
+
+    def job_ids(self) -> list[str]:
+        """Return the IDs of all jobs with a registered per-job bus."""
+        with self._lock:
+            return list(self._job_buses)

@@ -88,15 +88,17 @@ class EventBusJobLogger(JobLoggerABC):
         path.parent.mkdir(parents=True, exist_ok=True)
         file_stream = open(path, "w", encoding="utf-8")
 
+        job_bus = self._bus.job_bus(job_id)
+
         def _emit(line: str) -> None:
-            self._bus.push(
-                {
-                    "type": "log_line",
-                    "job_id": job_id,
-                    "line": line,
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                }
-            )
+            event = {
+                "type": "log_line",
+                "job_id": job_id,
+                "line": line,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }
+            job_bus.push(event)
+            self._bus.push(event)
 
         tee = TeeStream(file_stream, _emit)
         self._open_tees[job_id] = tee
@@ -107,3 +109,7 @@ class EventBusJobLogger(JobLoggerABC):
         tee = self._open_tees.pop(job_id, None)
         if tee is not None:
             tee.close()
+        # Mark the per-job bus done so polling clients know the log stream ended.
+        job_bus = self._bus.get_job_bus(job_id)
+        if job_bus is not None:
+            job_bus.close()

@@ -139,6 +139,124 @@ def test_events_invalid_cursor_returns_400() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_jobs_list_returns_registered_jobs() -> None:
+    bus = EventBus()
+    bus.job_bus("compile")
+    bus.job_bus("test")
+    bus.close()
+
+    _, port, t = _start_server(bus)
+
+    data = _get_json(f"http://127.0.0.1:{port}/jobs")
+    assert sorted(data["jobs"]) == ["compile", "test"]
+    assert data["pipeline_done"] is True
+
+    t.join(timeout=5.0)
+
+
+def test_job_events_returns_log_lines() -> None:
+    bus = EventBus()
+    job_bus = bus.job_bus("compile")
+    job_bus.push({"type": "log_line", "job_id": "compile", "line": "Building..."})
+    job_bus.close()
+    bus.close()
+
+    _, port, t = _start_server(bus)
+
+    data = _get_json(f"http://127.0.0.1:{port}/jobs/compile/events?cursor=0")
+    assert len(data["events"]) == 1
+    assert data["events"][0]["type"] == "log_line"
+    assert data["events"][0]["line"] == "Building..."
+    assert data["done"] is True
+
+    t.join(timeout=5.0)
+
+
+def test_job_events_unknown_job_returns_empty_not_done() -> None:
+    bus = EventBus()
+    _, port, t = _start_server(bus)
+
+    try:
+        data = _get_json(f"http://127.0.0.1:{port}/jobs/unknown/events")
+        assert data["events"] == []
+        assert data["done"] is False
+    finally:
+        bus.close()
+        t.join(timeout=5.0)
+
+
+def test_job_status_returns_correct_state() -> None:
+    bus = EventBus()
+    bus.push({"type": "job_started", "job_id": "compile"})
+    bus.push({"type": "job_completed", "job_id": "compile", "success": True})
+    job_bus = bus.job_bus("compile")
+    job_bus.push({"type": "log_line", "job_id": "compile", "line": "done"})
+    job_bus.close()
+    bus.close()
+
+    _, port, t = _start_server(bus)
+
+    data = _get_json(f"http://127.0.0.1:{port}/jobs/compile/status")
+    assert data["job_id"] == "compile"
+    assert data["status"] == "success"
+    assert data["done"] is True
+    assert data["log_event_count"] == 1
+
+    t.join(timeout=5.0)
+
+
+def test_job_status_unknown_job_returns_unknown() -> None:
+    bus = EventBus()
+    bus.close()
+
+    _, port, t = _start_server(bus)
+
+    data = _get_json(f"http://127.0.0.1:{port}/jobs/noexist/status")
+    assert data["status"] == "unknown"
+    assert data["done"] is False
+
+    t.join(timeout=5.0)
+
+
+def test_job_events_invalid_cursor_returns_400() -> None:
+    bus = EventBus()
+    bus.job_bus("compile")
+    _, port, t = _start_server(bus)
+
+    try:
+        import urllib.error
+
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/jobs/compile/events?cursor=bad"
+            )
+        assert exc_info.value.code == 400
+    finally:
+        bus.close()
+        t.join(timeout=5.0)
+
+
+def test_log_lines_do_not_appear_on_main_events_endpoint() -> None:
+    """Per-job buses are separate from the main pipeline bus."""
+    bus = EventBus()
+    bus.push({"type": "job_started", "job_id": "a"})
+    job_bus = bus.job_bus("a")
+    job_bus.push({"type": "log_line", "job_id": "a", "line": "output"})
+    job_bus.close()
+    bus.push({"type": "job_completed", "job_id": "a", "success": True})
+    bus.close()
+
+    _, port, t = _start_server(bus)
+
+    data = _get_json(f"http://127.0.0.1:{port}/events?cursor=0")
+    types = [e["type"] for e in data["events"]]
+    assert "log_line" not in types
+    assert "job_started" in types
+    assert "job_completed" in types
+
+    t.join(timeout=5.0)
+
+
 def test_unknown_path_returns_404() -> None:
     bus = EventBus()
     _, port, t = _start_server(bus)
