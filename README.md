@@ -43,6 +43,9 @@ uv run python main.py config.yaml --source-dir /path/to/source --output-dir arti
 
 # Or dry-run to validate config without executing:
 uv run python main.py config.yaml --source-dir /path/to/source --dry-run
+
+# For real-time monitoring via HTTP API, start a server on a local port:
+uv run python main.py config.yaml --source-dir /path/to/source --output-dir artifacts --port 8080
 ```
 
 ## Configuration
@@ -210,6 +213,163 @@ jobs:
     artifacts:
       - source_glob: "dist/*.tar.gz"
         destination_subdir: packages
+```
+
+## Accessing Step Output
+
+When running with the `--port` option, an HTTP server provides real-time access to job execution details. The server binds to `127.0.0.1` and exposes two endpoints:
+
+### Status Snapshot
+
+Get a quick overview of the build status:
+
+```bash
+curl http://127.0.0.1:8080/status
+```
+
+Response:
+```json
+{
+  "done": false,
+  "elapsed_seconds": 12.5,
+  "jobs": {
+    "compile": "running",
+    "test": "success",
+    "lint": "failed"
+  }
+}
+```
+
+### Real-Time Events (Long-Polling)
+
+Stream job events as they occur using long-polling. Start with `cursor=0` and increment it by the number of events received:
+
+```bash
+# Get initial events
+curl 'http://127.0.0.1:8080/events?cursor=0'
+
+# Response (one JSON object per line):
+# {"type": "job_started", "job_id": "compile", "timestamp": "2026-04-05T10:30:45Z"}
+# {"type": "job_output", "job_id": "compile", "output": "Compiling..."}
+# {"type": "job_completed", "job_id": "compile", "success": true, "timestamp": "2026-04-05T10:30:52Z"}
+# {"events": [...], "cursor": 3, "done": false}
+
+# Get next batch of events (cursor advanced by 3)
+curl 'http://127.0.0.1:8080/events?cursor=3'
+```
+
+Each response contains:
+- `events`: Array of job lifecycle events
+- `cursor`: Next cursor position to request
+- `done`: True when the build is complete and no more events are pending
+
+Repeat requests with the updated cursor until `done` is true and `events` is empty.
+
+**Example: Python Client**
+
+```python
+import requests
+import json
+
+cursor = 0
+while True:
+    response = requests.get(f"http://127.0.0.1:8080/events?cursor={cursor}")
+    data = response.json()
+    
+    for event in data["events"]:
+        print(f"{event['type']}: {event.get('job_id', 'N/A')}")
+    
+    cursor = data["cursor"]
+    if data["done"] and not data["events"]:
+        break
+```
+
+### Event Schema
+
+The `/events` endpoint returns a stream of JSON events representing pipeline and job lifecycle changes. Each event includes a `type` field identifying its purpose, and additional fields specific to that event type.
+
+#### event_type: `job_started`
+
+Emitted when a job begins execution.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `type` | string | Yes | Always `"job_started"` |
+| `job_id` | string | Yes | Unique identifier of the job that started |
+| `ts` | string | Yes | ISO 8601 timestamp (UTC) when the job started |
+
+**Example:**
+```json
+{
+  "type": "job_started",
+  "job_id": "compile",
+  "ts": "2026-04-05T10:30:45.123456Z"
+}
+```
+
+#### event_type: `job_completed`
+
+Emitted when a job finishes execution (regardless of success or failure).
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `type` | string | Yes | Always `"job_completed"` |
+| `job_id` | string | Yes | Unique identifier of the job that completed |
+| `success` | boolean | Yes | `true` if the job succeeded, `false` if it failed |
+| `ts` | string | Yes | ISO 8601 timestamp (UTC) when the job completed |
+
+**Example:**
+```json
+{
+  "type": "job_completed",
+  "job_id": "compile",
+  "success": true,
+  "ts": "2026-04-05T10:30:52.654321Z"
+}
+```
+
+#### event_type: `log_line`
+
+Emitted for each complete line of output from a running job.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `type` | string | Yes | Always `"log_line"` |
+| `job_id` | string | Yes | Unique identifier of the job producing the output |
+| `line` | string | Yes | A single line of job output (newline character removed) |
+| `ts` | string | Yes | ISO 8601 timestamp (UTC) when the line was emitted |
+
+**Example:**
+```json
+{
+  "type": "log_line",
+  "job_id": "compile",
+  "line": "Compiling main.c...",
+  "ts": "2026-04-05T10:30:47.234567Z"
+}
+```
+
+#### event_type: `pipeline_complete`
+
+Emitted once when the entire pipeline finishes execution.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `type` | string | Yes | Always `"pipeline_complete"` |
+| `success` | boolean | Yes | `true` if all jobs succeeded, `false` if any job failed |
+| `total_jobs` | integer | Yes | Total number of jobs in the pipeline |
+| `failed_jobs` | integer | Yes | Number of jobs that failed (0 if `success` is `true`) |
+| `ts` | string | Yes | ISO 8601 timestamp (UTC) when the pipeline completed |
+
+**Example:**
+```json
+{
+  "type": "pipeline_complete",
+  "success": true,
+  "total_jobs": 3,
+  "failed_jobs": 0,
+  "ts": "2026-04-05T10:31:05.987654Z"
+}
 ```
 
 ## Architecture
