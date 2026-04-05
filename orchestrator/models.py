@@ -23,6 +23,11 @@ class ResourceDriver(Enum):
     FILE_SHARE = "file_share"
 
 
+class ContainerOS(Enum):
+    LINUX = "linux"
+    WINDOWS = "windows"
+
+
 @dataclass(frozen=True)
 class ResourceWeight:
     """Relative resource cost of a job expressed in abstract slot units.
@@ -101,6 +106,7 @@ class JobSpec:
     volumes: list[VolumeMount] = field(default_factory=list)
     env_vars: dict[str, str] = field(default_factory=dict)
     resources: list[str] = field(default_factory=list)
+    container_os: ContainerOS = ContainerOS.LINUX
 
 
 @dataclass(frozen=True)

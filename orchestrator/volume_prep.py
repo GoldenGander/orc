@@ -12,13 +12,33 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from orchestrator.models import JobSpec, ResourceDriver, ResourceSpec, VolumeMount
+from orchestrator.models import ContainerOS, JobSpec, ResourceDriver, ResourceSpec, VolumeMount
 from orchestrator.path_safety import require_safe_path_component
 
-CONTAINER_SOURCE_PATH = "/src"
-CONTAINER_OUTPUT_PATH = "/output"
-CONTAINER_INPUT_PREFIX = "/input"
+LINUX_CONTAINER_SOURCE_PATH = "/src"
+LINUX_CONTAINER_OUTPUT_PATH = "/output"
+LINUX_CONTAINER_INPUT_PREFIX = "/input"
+WINDOWS_CONTAINER_SOURCE_PATH = r"C:\src"
+WINDOWS_CONTAINER_OUTPUT_PATH = r"C:\output"
+WINDOWS_CONTAINER_INPUT_PREFIX = r"C:\input"
 RESOURCE_OUTPUT_DIRNAME = "resources"
+
+# Backwards-compatible aliases for existing Linux-oriented callers/tests.
+CONTAINER_SOURCE_PATH = LINUX_CONTAINER_SOURCE_PATH
+CONTAINER_OUTPUT_PATH = LINUX_CONTAINER_OUTPUT_PATH
+CONTAINER_INPUT_PREFIX = LINUX_CONTAINER_INPUT_PREFIX
+
+
+def _container_source_path(job: JobSpec) -> str:
+    return WINDOWS_CONTAINER_SOURCE_PATH if job.container_os == ContainerOS.WINDOWS else LINUX_CONTAINER_SOURCE_PATH
+
+
+def _container_output_path(job: JobSpec) -> str:
+    return WINDOWS_CONTAINER_OUTPUT_PATH if job.container_os == ContainerOS.WINDOWS else LINUX_CONTAINER_OUTPUT_PATH
+
+
+def _container_input_prefix(job: JobSpec) -> str:
+    return WINDOWS_CONTAINER_INPUT_PREFIX if job.container_os == ContainerOS.WINDOWS else LINUX_CONTAINER_INPUT_PREFIX
 
 
 def compute_job_volumes(
@@ -48,12 +68,12 @@ def compute_job_volumes(
     vols: list[VolumeMount] = [
         VolumeMount(
             host_path=str(source_dir),
-            container_path=CONTAINER_SOURCE_PATH,
+            container_path=_container_source_path(job),
             read_only=True,
         ),
         VolumeMount(
             host_path=str(job_output_dir),
-            container_path=CONTAINER_OUTPUT_PATH,
+            container_path=_container_output_path(job),
             read_only=False,
         ),
     ]
@@ -77,7 +97,11 @@ def compute_job_volumes(
         vols.append(
             VolumeMount(
                 host_path=str(source_output_dir),
-                container_path=f"{CONTAINER_INPUT_PREFIX}/{safe_source_id}",
+                container_path=(
+                    f"{_container_input_prefix(job)}\\{safe_source_id}"
+                    if job.container_os == ContainerOS.WINDOWS
+                    else f"{_container_input_prefix(job)}/{safe_source_id}"
+                ),
                 read_only=True,
             )
         )
@@ -100,6 +124,6 @@ def compute_resource_output_volume(
     output_dir.mkdir(parents=True, exist_ok=True)
     return VolumeMount(
         host_path=str(output_dir),
-        container_path=CONTAINER_OUTPUT_PATH,
+        container_path=LINUX_CONTAINER_OUTPUT_PATH,
         read_only=False,
     )

@@ -12,6 +12,7 @@ from orchestrator.path_safety import require_safe_path_component
 from orchestrator.models import (
     ArtifactSpec,
     BuildPlan,
+    ContainerOS,
     FailurePolicy,
     JobSpec,
     ResourceDriver,
@@ -54,6 +55,7 @@ class RawJobConfig:
     env_vars: dict[str, str] = field(default_factory=dict)
     input_from: list[str] = field(default_factory=list)
     resources: list[str] = field(default_factory=list)
+    container_os: str = ContainerOS.LINUX.value
 
 
 @dataclass
@@ -257,6 +259,10 @@ class YamlConfigLoader(IConfigLoader):
                 raise ConfigurationError(f"Job '{job.id}': memory_slots must be >= 1")
             if job.timeout_seconds is not None and job.timeout_seconds < 1:
                 raise ConfigurationError(f"Job '{job.id}': timeout_seconds must be >= 1")
+            if job.container_os not in {o.value for o in ContainerOS}:
+                raise ConfigurationError(
+                    f"Job '{job.id}': container_os must be one of {[o.value for o in ContainerOS]}"
+                )
             for index, artifact in enumerate(job.artifacts):
                 _validate_artifact_destination_subdir(
                     artifact.destination_subdir,
@@ -399,6 +405,7 @@ class YamlConfigLoader(IConfigLoader):
                 ],
                 env_vars=rj.env_vars,
                 resources=rj.resources,
+                container_os=ContainerOS(rj.container_os),
             )
             for rj in raw.jobs
         ]
@@ -485,6 +492,10 @@ def _parse_job(entry: dict[str, Any], index: int) -> RawJobConfig:
     if not isinstance(resources, list) or not all(isinstance(r, str) for r in resources):
         raise ConfigurationError(f"{prefix}.resources: expected a list of strings")
 
+    container_os = entry.get("container_os", ContainerOS.LINUX.value)
+    if not isinstance(container_os, str):
+        raise ConfigurationError(f"{prefix}.container_os: expected a string")
+
     return RawJobConfig(
         id=entry["id"],
         image=entry["image"],
@@ -498,6 +509,7 @@ def _parse_job(entry: dict[str, Any], index: int) -> RawJobConfig:
         env_vars=env_vars,
         input_from=input_from,
         resources=resources,
+        container_os=container_os,
     )
 
 
