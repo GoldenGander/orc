@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import shutil
 import sys
 import tempfile
 import threading
@@ -33,6 +34,11 @@ def _parse_args() -> AzureCliArgs:
         default=None,
         help="Start HTTP SSE server on this local port (ADO async mode).",
     )
+    parser.add_argument(
+        "--keep-logs",
+        action="store_true",
+        help="Copy job logs to --output-dir/logs/ after completion (always on failure).",
+    )
     args = parser.parse_args()
     return AzureCliArgs(
         config_path=args.config,
@@ -40,6 +46,7 @@ def _parse_args() -> AzureCliArgs:
         source_dir=args.source_dir,
         dry_run=args.dry_run,
         port=args.port,
+        keep_logs=args.keep_logs,
     )
 
 
@@ -189,6 +196,11 @@ def main() -> None:
                 result = engine.run(plan)
             finally:
                 executor.shutdown()
+
+        if (not result.success or args.keep_logs) and log_dir.exists():
+            dest = args.output_dir / "logs"
+            dest.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(log_dir, dest, dirs_exist_ok=True)
 
     if not result.success:
         failed = [r.job_id for r in result.job_results if not r.success]
