@@ -36,8 +36,13 @@ def job_logger(tmp_path: Path) -> FileJobLogger:
 
 
 @pytest.fixture
-def executor(job_logger: FileJobLogger) -> DockerExecutor:
-    ex = DockerExecutor(logger=job_logger, max_workers=2)
+def executor(job_logger: FileJobLogger, tmp_path: Path) -> DockerExecutor:
+    ex = DockerExecutor(
+        logger=job_logger,
+        source_dir=tmp_path / "src",
+        container_output_root=tmp_path / "out",
+        max_workers=2,
+    )
     yield ex
     ex.shutdown(wait=True)
 
@@ -283,9 +288,14 @@ class TestShutdown:
 
     @patch("orchestrator.executor.docker_executor.subprocess.run", side_effect=_fake_run_success)
     def test_shutdown_after_submit(
-        self, _mock_run, job_logger: FileJobLogger, job_a: JobSpec
+        self, _mock_run, job_logger: FileJobLogger, job_a: JobSpec, tmp_path: Path
     ):
-        ex = DockerExecutor(logger=job_logger, max_workers=1)
+        ex = DockerExecutor(
+            logger=job_logger,
+            source_dir=tmp_path / "src",
+            container_output_root=tmp_path / "out",
+            max_workers=1,
+        )
         future = ex.submit(job_a)
         ex.shutdown(wait=True)
         assert future.done()

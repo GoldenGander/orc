@@ -29,7 +29,6 @@ from orchestrator.logger import FileJobLogger
 from orchestrator.models import OrchestratorResult
 from orchestrator.pipeline import IPipelineReporter
 from orchestrator.scheduler import ResourceScheduler
-from orchestrator.volume_prep import prepare_volumes
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 QTWASM_SAMPLE_DIR = Path(__file__).parent.parent / "QtWasm" / "sample"
@@ -65,6 +64,10 @@ class RecordingReporter(IPipelineReporter):
     @override
     def report_result(self, result: OrchestratorResult) -> None:
         self.final_result = result
+
+    @override
+    def report_resource_status(self, resources: object) -> None:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -155,13 +158,16 @@ def _run_plan(
             elif path.is_dir():
                 shutil.copytree(path, source_dir / path.name)
 
-    prepare_volumes(plan, source_dir, container_output_root)
-
     job_logger = FileJobLogger(log_dir)
     artifact_store = ArtifactStore(staging_dir, container_output_root)
     reporter = RecordingReporter()
     scheduler = ResourceScheduler(plan)
-    executor = DockerExecutor(logger=job_logger, max_workers=plan.max_parallel)
+    executor = DockerExecutor(
+        logger=job_logger,
+        source_dir=source_dir,
+        container_output_root=container_output_root,
+        max_workers=plan.max_parallel,
+    )
 
     try:
         engine = Engine(
@@ -205,15 +211,17 @@ class TestFullPipelineFromYaml:
         staging_dir = tmp_path / "staging"
         source_dir.mkdir()
 
-        # ---- inject system volumes ----
-        prepare_volumes(plan, source_dir, container_output_root)
-
         # ---- wire up real components ----
         job_logger = FileJobLogger(log_dir)
         artifact_store = ArtifactStore(staging_dir, container_output_root)
         reporter = RecordingReporter()
         scheduler = ResourceScheduler(plan)
-        executor = DockerExecutor(logger=job_logger, max_workers=plan.max_parallel)
+        executor = DockerExecutor(
+            logger=job_logger,
+            source_dir=source_dir,
+            container_output_root=container_output_root,
+            max_workers=plan.max_parallel,
+        )
 
         engine = Engine(
             scheduler=scheduler,
@@ -289,13 +297,16 @@ jobs:
         staging_dir = tmp_path / "staging"
         source_dir.mkdir()
 
-        prepare_volumes(plan, source_dir, container_output_root)
-
         job_logger = FileJobLogger(log_dir)
         artifact_store = ArtifactStore(staging_dir, container_output_root)
         reporter = RecordingReporter()
         scheduler = ResourceScheduler(plan)
-        executor = DockerExecutor(logger=job_logger, max_workers=plan.max_parallel)
+        executor = DockerExecutor(
+            logger=job_logger,
+            source_dir=source_dir,
+            container_output_root=container_output_root,
+            max_workers=plan.max_parallel,
+        )
 
         engine = Engine(
             scheduler=scheduler,
@@ -354,13 +365,16 @@ jobs:
         container_output_root = tmp_path / "container_outputs"
         staging_dir = tmp_path / "staging"
 
-        prepare_volumes(plan, source_dir, container_output_root)
-
         job_logger = FileJobLogger(log_dir)
         artifact_store = ArtifactStore(staging_dir, container_output_root)
         reporter = RecordingReporter()
         scheduler = ResourceScheduler(plan)
-        executor = DockerExecutor(logger=job_logger, max_workers=1)
+        executor = DockerExecutor(
+            logger=job_logger,
+            source_dir=source_dir,
+            container_output_root=container_output_root,
+            max_workers=1,
+        )
 
         engine = Engine(
             scheduler=scheduler,
@@ -688,13 +702,16 @@ jobs:
         staging_dir = tmp_path / "staging"
         source_dir.mkdir()
 
-        prepare_volumes(plan, source_dir, container_output_root)
-
         job_logger = FileJobLogger(log_dir)
         artifact_store = ArtifactStore(staging_dir, container_output_root)
         reporter = RecordingReporter()
         scheduler = ResourceScheduler(plan)
-        executor = DockerExecutor(logger=job_logger, max_workers=plan.max_parallel)
+        executor = DockerExecutor(
+            logger=job_logger,
+            source_dir=source_dir,
+            container_output_root=container_output_root,
+            max_workers=plan.max_parallel,
+        )
 
         engine = Engine(
             scheduler=scheduler,

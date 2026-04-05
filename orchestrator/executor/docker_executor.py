@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import io
 import json
 import logging
 import subprocess
 import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
+from pathlib import Path
 from typing import override
 
 from orchestrator.exceptions import ConfigurationError
@@ -18,6 +20,7 @@ from orchestrator.models import (
     ResourceDriver,
     ResourceSpec,
 )
+from orchestrator.volume_prep import compute_job_volumes, compute_resource_output_volume
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +36,13 @@ class DockerExecutor(ExecutorABC):
     def __init__(
         self,
         logger: JobLoggerABC,
+        source_dir: Path,
+        container_output_root: Path,
         max_workers: int = 4,
     ) -> None:
         self._logger = logger
+        self._source_dir = source_dir
+        self._container_output_root = container_output_root
         self._pool = ThreadPoolExecutor(max_workers=max_workers)
         self._network: str | None = None
         self._default_job_timeout_seconds: int | None = 3600
@@ -44,11 +51,15 @@ class DockerExecutor(ExecutorABC):
         self._service_ready_poll_seconds = 0.5
         self._service_ready_timeout_seconds = 30.0
         self._service_startup_stability_seconds = 1.0
+        self._file_shares: dict[str, ResourceSpec] = {}
 
     @override
     def start(self, plan: BuildPlan) -> None:
         self._network = plan.resource_network
         self._default_job_timeout_seconds = plan.job_timeout_seconds
+        self._file_shares = {
+            r.id: r for r in plan.resources if r.driver == ResourceDriver.FILE_SHARE
+        }
         managed_container_resources: list[ResourceSpec] = []
         for resource in plan.resources:
             if resource.driver == ResourceDriver.DOCKER_CONTAINER:
@@ -110,7 +121,10 @@ class DockerExecutor(ExecutorABC):
         cmd.extend(["--name", container_name])
         if self._network is not None:
             cmd.extend(["--network", self._network])
-        for vol in job.volumes:
+        system_vols = compute_job_volumes(
+            job, self._source_dir, self._container_output_root, self._file_shares
+        )
+        for vol in list(job.volumes) + system_vols:
             mount = f"{vol.host_path}:{vol.container_path}"
             if vol.read_only:
                 mount += ":ro"
@@ -138,13 +152,34 @@ class DockerExecutor(ExecutorABC):
         timeout_seconds = self._job_timeout_seconds(job)
         start = time.monotonic()
         try:
-            result = subprocess.run(
-                self._build_docker_command(job, container_name),
-                stdout=stream,
-                stderr=subprocess.STDOUT,
-                text=True,
-                timeout=timeout_seconds,
-            )
+            # Streams with no OS file descriptor (e.g. TeeStream) cannot be
+            # passed directly to subprocess — use PIPE and write output after.
+            try:
+                stream.fileno()
+                has_fd = True
+            except io.UnsupportedOperation:
+                has_fd = False
+
+            cmd = self._build_docker_command(job, container_name)
+            if has_fd:
+                result = subprocess.run(
+                    cmd,
+                    stdout=stream,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    timeout=timeout_seconds,
+                )
+            else:
+                result = subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    timeout=timeout_seconds,
+                )
+                if result.stdout:
+                    stream.write(result.stdout)
+
             duration = time.monotonic() - start
             return JobResult(
                 job_id=job.id,
@@ -229,7 +264,8 @@ class DockerExecutor(ExecutorABC):
         ]
         for alias in resource.aliases:
             cmd.extend(["--network-alias", alias])
-        for vol in resource.volumes:
+        output_vol = compute_resource_output_volume(resource, self._container_output_root)
+        for vol in list(resource.volumes) + [output_vol]:
             mount = f"{vol.host_path}:{vol.container_path}"
             if vol.read_only:
                 mount += ":ro"
