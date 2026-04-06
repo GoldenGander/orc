@@ -8,6 +8,7 @@ import pytest
 from orchestrator.exceptions import ConfigurationError
 from orchestrator.models import (
     ArtifactSpec,
+    ContainerOS,
     JobSpec,
     ResourceDriver,
     ResourceSpec,
@@ -29,6 +30,7 @@ def _job(
     volumes: list[VolumeMount] | None = None,
     input_from: frozenset[str] | None = None,
     depends_on: frozenset[str] | None = None,
+    container_os: ContainerOS = ContainerOS.LINUX,
 ) -> JobSpec:
     return JobSpec(
         id=jid,
@@ -38,6 +40,7 @@ def _job(
         artifacts=[ArtifactSpec(source_glob="*.bin", destination_subdir=jid)],
         input_from=input_from or frozenset(),
         volumes=list(volumes or []),
+        container_os=container_os,
     )
 
 
@@ -90,6 +93,21 @@ class TestComputeJobVolumes:
         assert len(output_vols) == 1
         assert output_vols[0].host_path == str(tmp_path / "out" / "a")
         assert output_vols[0].read_only is False
+
+    def test_windows_job_uses_windows_mount_paths(self, tmp_path: Path) -> None:
+        source = tmp_path / "src"
+        source.mkdir()
+        job = _job("a", container_os=ContainerOS.WINDOWS)
+
+        vols = compute_job_volumes(job, source, tmp_path / "out", {})
+
+        mounted = {v.container_path: v for v in vols}
+        assert r"C:\src" in mounted
+        assert mounted[r"C:\src"].host_path == str(source)
+        assert mounted[r"C:\src"].read_only is True
+        assert r"C:\output" in mounted
+        assert mounted[r"C:\output"].host_path == str(tmp_path / "out" / "a")
+        assert mounted[r"C:\output"].read_only is False
 
     def test_creates_per_job_output_directory(self, tmp_path: Path) -> None:
         source = tmp_path / "src"

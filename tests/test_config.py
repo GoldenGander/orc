@@ -7,7 +7,7 @@ from textwrap import dedent
 
 from orchestrator.config import YamlConfigLoader
 from orchestrator.exceptions import ConfigurationError
-from orchestrator.models import FailurePolicy
+from orchestrator.models import ContainerOS, FailurePolicy
 
 
 @pytest.fixture
@@ -117,6 +117,33 @@ class TestValidConfig:
         assert test.depends_on == frozenset({"build"})
         assert test.resource_weight.cpu_slots == 1
         assert test.resource_weight.memory_slots == 2
+
+    def test_job_container_os_defaults_to_linux(
+        self, loader: YamlConfigLoader, tmp_path: Path
+    ) -> None:
+        path = _write_yaml(tmp_path, """\
+            jobs:
+              - id: compile
+                image: registry/builder:latest
+        """)
+
+        plan = loader.load(path)
+
+        assert plan.jobs[0].container_os == ContainerOS.LINUX
+
+    def test_job_container_os_accepts_windows(
+        self, loader: YamlConfigLoader, tmp_path: Path
+    ) -> None:
+        path = _write_yaml(tmp_path, """\
+            jobs:
+              - id: compile
+                image: registry/builder:latest
+                container_os: windows
+        """)
+
+        plan = loader.load(path)
+
+        assert plan.jobs[0].container_os == ContainerOS.WINDOWS
 
     def test_empty_jobs_list(self, loader: YamlConfigLoader, tmp_path: Path) -> None:
         path = _write_yaml(tmp_path, """\
@@ -256,6 +283,30 @@ class TestSchemaViolations:
               - "just a string"
         """)
         with pytest.raises(ConfigurationError, match="expected a mapping"):
+            loader.load(path)
+
+    def test_job_container_os_not_a_string(
+        self, loader: YamlConfigLoader, tmp_path: Path
+    ) -> None:
+        path = _write_yaml(tmp_path, """\
+            jobs:
+              - id: compile
+                image: registry/builder:latest
+                container_os: 123
+        """)
+        with pytest.raises(ConfigurationError, match="container_os: expected a string"):
+            loader.load(path)
+
+    def test_job_container_os_invalid_value(
+        self, loader: YamlConfigLoader, tmp_path: Path
+    ) -> None:
+        path = _write_yaml(tmp_path, """\
+            jobs:
+              - id: compile
+                image: registry/builder:latest
+                container_os: macos
+        """)
+        with pytest.raises(ConfigurationError, match="container_os must be one of"):
             loader.load(path)
 
     @pytest.mark.parametrize(
