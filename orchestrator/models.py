@@ -89,6 +89,7 @@ class ResourceSpec:
     artifacts: list[ArtifactSpec] = field(default_factory=list)
     volumes: list[VolumeMount] = field(default_factory=list)
     env_vars: dict[str, str] = field(default_factory=dict)
+    container_os: ContainerOS = ContainerOS.LINUX
 
 
 @dataclass

@@ -264,7 +264,9 @@ class DockerExecutor(ExecutorABC):
         ]
         for alias in resource.aliases:
             cmd.extend(["--network-alias", alias])
-        output_vol = compute_resource_output_volume(resource, self._container_output_root)
+        output_vol = compute_resource_output_volume(
+            resource, self._container_output_root, resource.container_os
+        )
         for vol in list(resource.volumes) + [output_vol]:
             mount = f"{vol.host_path}:{vol.container_path}"
             if vol.read_only:

@@ -4,9 +4,9 @@ These functions compute the system-managed volume mounts for jobs and
 resources. They are pure computations (plus directory creation side-effects)
 and do not mutate any BuildPlan or JobSpec objects.
 
-Container path conventions:
-    /src     — read-only source tree (jobs only)
-    /output  — writable artifact output directory
+Container path conventions (Linux / Windows):
+    /src  or C:\\src     — read-only source tree (jobs only)
+    /output or C:\\output — writable artifact output directory
 """
 from __future__ import annotations
 
@@ -23,22 +23,19 @@ WINDOWS_CONTAINER_OUTPUT_PATH = r"C:\output"
 WINDOWS_CONTAINER_INPUT_PREFIX = r"C:\input"
 RESOURCE_OUTPUT_DIRNAME = "resources"
 
-# Backwards-compatible aliases for existing Linux-oriented callers/tests.
-CONTAINER_SOURCE_PATH = LINUX_CONTAINER_SOURCE_PATH
-CONTAINER_OUTPUT_PATH = LINUX_CONTAINER_OUTPUT_PATH
-CONTAINER_INPUT_PREFIX = LINUX_CONTAINER_INPUT_PREFIX
+
+def _container_source_path(os: ContainerOS) -> str:
+    return WINDOWS_CONTAINER_SOURCE_PATH if os == ContainerOS.WINDOWS else LINUX_CONTAINER_SOURCE_PATH
 
 
-def _container_source_path(job: JobSpec) -> str:
-    return WINDOWS_CONTAINER_SOURCE_PATH if job.container_os == ContainerOS.WINDOWS else LINUX_CONTAINER_SOURCE_PATH
+def _container_output_path(os: ContainerOS) -> str:
+    return WINDOWS_CONTAINER_OUTPUT_PATH if os == ContainerOS.WINDOWS else LINUX_CONTAINER_OUTPUT_PATH
 
 
-def _container_output_path(job: JobSpec) -> str:
-    return WINDOWS_CONTAINER_OUTPUT_PATH if job.container_os == ContainerOS.WINDOWS else LINUX_CONTAINER_OUTPUT_PATH
-
-
-def _container_input_prefix(job: JobSpec) -> str:
-    return WINDOWS_CONTAINER_INPUT_PREFIX if job.container_os == ContainerOS.WINDOWS else LINUX_CONTAINER_INPUT_PREFIX
+def _container_input_path(os: ContainerOS, source_id: str) -> str:
+    if os == ContainerOS.WINDOWS:
+        return f"{WINDOWS_CONTAINER_INPUT_PREFIX}\\{source_id}"
+    return f"{LINUX_CONTAINER_INPUT_PREFIX}/{source_id}"
 
 
 def compute_job_volumes(
@@ -68,12 +65,12 @@ def compute_job_volumes(
     vols: list[VolumeMount] = [
         VolumeMount(
             host_path=str(source_dir),
-            container_path=_container_source_path(job),
+            container_path=_container_source_path(job.container_os),
             read_only=True,
         ),
         VolumeMount(
             host_path=str(job_output_dir),
-            container_path=_container_output_path(job),
+            container_path=_container_output_path(job.container_os),
             read_only=False,
         ),
     ]
@@ -97,11 +94,7 @@ def compute_job_volumes(
         vols.append(
             VolumeMount(
                 host_path=str(source_output_dir),
-                container_path=(
-                    f"{_container_input_prefix(job)}\\{safe_source_id}"
-                    if job.container_os == ContainerOS.WINDOWS
-                    else f"{_container_input_prefix(job)}/{safe_source_id}"
-                ),
+                container_path=_container_input_path(job.container_os, safe_source_id),
                 read_only=True,
             )
         )
@@ -112,6 +105,7 @@ def compute_job_volumes(
 def compute_resource_output_volume(
     resource: ResourceSpec,
     container_output_root: Path,
+    container_os: ContainerOS,
 ) -> VolumeMount:
     """Return the system-managed output VolumeMount for a managed resource.
 
@@ -124,6 +118,6 @@ def compute_resource_output_volume(
     output_dir.mkdir(parents=True, exist_ok=True)
     return VolumeMount(
         host_path=str(output_dir),
-        container_path=LINUX_CONTAINER_OUTPUT_PATH,
+        container_path=_container_output_path(container_os),
         read_only=False,
     )

@@ -16,9 +16,9 @@ from orchestrator.models import (
     VolumeMount,
 )
 from orchestrator.volume_prep import (
-    CONTAINER_INPUT_PREFIX,
-    CONTAINER_OUTPUT_PATH,
-    CONTAINER_SOURCE_PATH,
+    LINUX_CONTAINER_INPUT_PREFIX,
+    LINUX_CONTAINER_OUTPUT_PATH,
+    LINUX_CONTAINER_SOURCE_PATH,
     RESOURCE_OUTPUT_DIRNAME,
     compute_job_volumes,
     compute_resource_output_volume,
@@ -77,7 +77,7 @@ class TestComputeJobVolumes:
 
         vols = compute_job_volumes(job, source, tmp_path / "out", {})
 
-        source_vols = [v for v in vols if v.container_path == CONTAINER_SOURCE_PATH]
+        source_vols = [v for v in vols if v.container_path == LINUX_CONTAINER_SOURCE_PATH]
         assert len(source_vols) == 1
         assert source_vols[0].host_path == str(source)
         assert source_vols[0].read_only is True
@@ -89,7 +89,7 @@ class TestComputeJobVolumes:
 
         vols = compute_job_volumes(job, source, tmp_path / "out", {})
 
-        output_vols = [v for v in vols if v.container_path == CONTAINER_OUTPUT_PATH]
+        output_vols = [v for v in vols if v.container_path == LINUX_CONTAINER_OUTPUT_PATH]
         assert len(output_vols) == 1
         assert output_vols[0].host_path == str(tmp_path / "out" / "a")
         assert output_vols[0].read_only is False
@@ -127,8 +127,8 @@ class TestComputeJobVolumes:
         vols_a = compute_job_volumes(_job("a"), source, tmp_path / "out", {})
         vols_b = compute_job_volumes(_job("b"), source, tmp_path / "out", {})
 
-        out_a = next(v for v in vols_a if v.container_path == CONTAINER_OUTPUT_PATH)
-        out_b = next(v for v in vols_b if v.container_path == CONTAINER_OUTPUT_PATH)
+        out_a = next(v for v in vols_a if v.container_path == LINUX_CONTAINER_OUTPUT_PATH)
+        out_b = next(v for v in vols_b if v.container_path == LINUX_CONTAINER_OUTPUT_PATH)
         assert out_a.host_path != out_b.host_path
         assert out_a.host_path.endswith("/a") or out_a.host_path.endswith("\\a")
         assert out_b.host_path.endswith("/b") or out_b.host_path.endswith("\\b")
@@ -140,8 +140,8 @@ class TestComputeJobVolumes:
         vols_a = compute_job_volumes(_job("a"), source, tmp_path / "out", {})
         vols_b = compute_job_volumes(_job("b"), source, tmp_path / "out", {})
 
-        src_a = next(v for v in vols_a if v.container_path == CONTAINER_SOURCE_PATH)
-        src_b = next(v for v in vols_b if v.container_path == CONTAINER_SOURCE_PATH)
+        src_a = next(v for v in vols_a if v.container_path == LINUX_CONTAINER_SOURCE_PATH)
+        src_b = next(v for v in vols_b if v.container_path == LINUX_CONTAINER_SOURCE_PATH)
         assert src_a.host_path == src_b.host_path == str(source)
 
     def test_does_not_include_user_declared_volumes(self, tmp_path: Path) -> None:
@@ -220,9 +220,9 @@ class TestInputFromVolumes:
 
         vols = compute_job_volumes(opt_job, source, tmp_path / "out", {})
 
-        input_vols = [v for v in vols if v.container_path.startswith(CONTAINER_INPUT_PREFIX)]
+        input_vols = [v for v in vols if v.container_path.startswith(LINUX_CONTAINER_INPUT_PREFIX)]
         assert len(input_vols) == 1
-        assert input_vols[0].container_path == f"{CONTAINER_INPUT_PREFIX}/compile"
+        assert input_vols[0].container_path == f"{LINUX_CONTAINER_INPUT_PREFIX}/compile"
         assert input_vols[0].host_path == str(tmp_path / "out" / "compile")
         assert input_vols[0].read_only is True
 
@@ -236,9 +236,9 @@ class TestInputFromVolumes:
         compile_vols = compute_job_volumes(compile_job, source, out_root, {})
         opt_vols = compute_job_volumes(opt_job, source, out_root, {})
 
-        compile_output = next(v for v in compile_vols if v.container_path == CONTAINER_OUTPUT_PATH)
+        compile_output = next(v for v in compile_vols if v.container_path == LINUX_CONTAINER_OUTPUT_PATH)
         input_vol = next(
-            v for v in opt_vols if v.container_path == f"{CONTAINER_INPUT_PREFIX}/compile"
+            v for v in opt_vols if v.container_path == f"{LINUX_CONTAINER_INPUT_PREFIX}/compile"
         )
         assert input_vol.host_path == compile_output.host_path
 
@@ -269,12 +269,12 @@ class TestInputFromVolumes:
         input_vols = {
             v.container_path: v
             for v in vols
-            if v.container_path.startswith(CONTAINER_INPUT_PREFIX)
+            if v.container_path.startswith(LINUX_CONTAINER_INPUT_PREFIX)
         }
-        assert f"{CONTAINER_INPUT_PREFIX}/job-a" in input_vols
-        assert f"{CONTAINER_INPUT_PREFIX}/job-b" in input_vols
-        assert input_vols[f"{CONTAINER_INPUT_PREFIX}/job-a"].read_only is True
-        assert input_vols[f"{CONTAINER_INPUT_PREFIX}/job-b"].read_only is True
+        assert f"{LINUX_CONTAINER_INPUT_PREFIX}/job-a" in input_vols
+        assert f"{LINUX_CONTAINER_INPUT_PREFIX}/job-b" in input_vols
+        assert input_vols[f"{LINUX_CONTAINER_INPUT_PREFIX}/job-a"].read_only is True
+        assert input_vols[f"{LINUX_CONTAINER_INPUT_PREFIX}/job-b"].read_only is True
 
     def test_job_without_input_from_gets_no_input_mounts(self, tmp_path: Path) -> None:
         source = tmp_path / "src"
@@ -282,24 +282,24 @@ class TestInputFromVolumes:
 
         vols = compute_job_volumes(_job("standalone"), source, tmp_path / "out", {})
 
-        assert not any(v.container_path.startswith(CONTAINER_INPUT_PREFIX) for v in vols)
+        assert not any(v.container_path.startswith(LINUX_CONTAINER_INPUT_PREFIX) for v in vols)
 
 
 class TestComputeResourceOutputVolume:
     def test_output_mount_is_read_write(self, tmp_path: Path) -> None:
         resource = _managed_resource("redis")
 
-        vol = compute_resource_output_volume(resource, tmp_path / "out")
+        vol = compute_resource_output_volume(resource, tmp_path / "out", ContainerOS.LINUX)
 
-        assert vol.container_path == CONTAINER_OUTPUT_PATH
+        assert vol.container_path == LINUX_CONTAINER_OUTPUT_PATH
         assert vol.host_path == str(tmp_path / "out" / RESOURCE_OUTPUT_DIRNAME / "redis")
         assert vol.read_only is False
 
     def test_creates_resource_output_directory(self, tmp_path: Path) -> None:
         out_root = tmp_path / "out"
 
-        compute_resource_output_volume(_managed_resource("redis"), out_root)
-        compute_resource_output_volume(_managed_resource("queue"), out_root)
+        compute_resource_output_volume(_managed_resource("redis"), out_root, ContainerOS.LINUX)
+        compute_resource_output_volume(_managed_resource("queue"), out_root, ContainerOS.LINUX)
 
         assert (out_root / RESOURCE_OUTPUT_DIRNAME / "redis").is_dir()
         assert (out_root / RESOURCE_OUTPUT_DIRNAME / "queue").is_dir()
@@ -315,9 +315,9 @@ class TestComputeResourceOutputVolume:
             container_path="/opt/boost",
             aliases=[],
         )
-        vol = compute_resource_output_volume(share, tmp_path / "out")
+        vol = compute_resource_output_volume(share, tmp_path / "out", ContainerOS.LINUX)
 
-        assert vol.container_path == CONTAINER_OUTPUT_PATH
+        assert vol.container_path == LINUX_CONTAINER_OUTPUT_PATH
 
     @pytest.mark.parametrize("resource_id", ["../escape", "a/b", "resource name", "aux"])
     def test_rejects_unsafe_resource_ids(self, tmp_path: Path, resource_id: str) -> None:
@@ -328,4 +328,4 @@ class TestComputeResourceOutputVolume:
             aliases=[],
         )
         with pytest.raises(ConfigurationError, match="single path component|Windows reserved name"):
-            compute_resource_output_volume(resource, tmp_path / "out")
+            compute_resource_output_volume(resource, tmp_path / "out", ContainerOS.LINUX)

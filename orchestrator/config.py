@@ -73,6 +73,7 @@ class RawResourceConfig:
     artifacts: list[RawArtifactConfig] = field(default_factory=list)
     volumes: list[RawVolumeConfig] = field(default_factory=list)
     env_vars: dict[str, str] = field(default_factory=dict)
+    container_os: str = ContainerOS.LINUX.value
 
 
 @dataclass
@@ -339,6 +340,10 @@ class YamlConfigLoader(IConfigLoader):
                     raise ConfigurationError(
                         f"Resource '{resource.id}': volumes are not supported for file_share resources"
                     )
+            if resource.container_os not in {o.value for o in ContainerOS}:
+                raise ConfigurationError(
+                    f"Resource '{resource.id}': container_os must be one of {[o.value for o in ContainerOS]}"
+                )
             for index, artifact in enumerate(resource.artifacts):
                 _validate_artifact_destination_subdir(
                     artifact.destination_subdir,
@@ -443,6 +448,7 @@ class YamlConfigLoader(IConfigLoader):
                         for v in resource.volumes
                     ],
                     env_vars=resource.env_vars,
+                    container_os=ContainerOS(resource.container_os),
                 )
                 for resource in raw.resources
             ],
@@ -626,6 +632,10 @@ def _parse_resources(raw_resources: Any) -> list[RawResourceConfig]:
         if not isinstance(env_vars, dict):
             raise ConfigurationError(f"{prefix}.env_vars: expected a mapping")
 
+        container_os = raw_resource.get("container_os", ContainerOS.LINUX.value)
+        if not isinstance(container_os, str):
+            raise ConfigurationError(f"{prefix}.container_os: expected a string")
+
         resources.append(
             RawResourceConfig(
                 id=resource_id,
@@ -645,6 +655,7 @@ def _parse_resources(raw_resources: Any) -> list[RawResourceConfig]:
                     prefix=f"{prefix}.volumes",
                 ),
                 env_vars={str(k): str(v) for k, v in env_vars.items()},
+                container_os=container_os,
             )
         )
     return resources
